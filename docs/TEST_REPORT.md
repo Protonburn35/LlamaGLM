@@ -2,8 +2,8 @@
 
 | Capability | Status | Evidence/limit |
 | --- | --- | --- |
-| Source | PARTIAL | Native ownership and metadata/state planner; no distributed executor |
-| Local CPU fixtures | CPU_FIXTURE_PASS | Ownership/GGUF CTest targets, 8 native-planner integration cases, 1 inherited GLM architecture test |
+| Source | PARTIAL | Planner and owned-weight loaders; no stage evaluator or distributed executor |
+| Local CPU fixtures | CPU_FIXTURE_PASS | 3 CTest targets (8 planner cases); 2 GLM tests including owned weights; 2 non-GLM regression tests |
 | Real tensor descriptors | PASS | 1,412 descriptors across all four pinned headers; no tensor data loaded |
 | Windows compile | WINDOWS_COMPILE_PASS (CPU); CUDA pending | acae9b6aa, run 39512089611; newer local planner changes await Windows build |
 | Three-process TCP | THREE_PROCESS_TCP_NOT_RUN | Transport not implemented |
@@ -20,6 +20,8 @@ build/bin/test-llama-archs --arch glm5-next --backend CPU --seed 53 -v 5
 ```
 
 Require a nonzero completed-test summary from the architecture runner. A zero exit with muted/no summary is insufficient evidence by itself. Tests are assertions/checks in Release builds too; new checks do not rely on disabled C assertions.
+
+Owned-loader qualification uses a synthetic six-layer GLM fixture with small dimensions. It verifies exact rank tensor sets, byte-for-byte provider/file payload equality, owned byte counters, invalid plans/modes, refusal of ordinary context creation/export, and closure of file handles. The source GGUF is removed after use. This is three model-loading paths, not three-process TCP or distributed layer computation. The new side header also compiles as C and exports unmangled symbols in the shared library.
 
 No target-model logits, full-context allocations, GPU residency, timing or tokens/sec measurements exist. Windows Actions will compile native application targets and run CPU fixtures; hosted runners do not prove NVIDIA inference correctness.
 

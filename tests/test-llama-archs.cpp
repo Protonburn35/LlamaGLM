@@ -5,10 +5,12 @@
 #include "gguf.h"
 #include "ggml-cpp.h"
 #include "llama.h"
+#include "llama-stage.h"
 #include "llama-cpp.h"
 
 // TODO: replace with #include "llama-ext.h" in the future
 #include "../src/llama-arch.h"
+#include "../src/llama-model.h"
 #include "../src/llama-model-saver.h"
 
 #include <cinttypes>
@@ -17,6 +19,9 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <filesystem>
+#include <map>
+#include <set>
 #include <random>
 #include <regex>
 #include <stdexcept>
@@ -630,6 +635,95 @@ static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
     return std::make_pair(std::move(model), std::move(lctx));
 }
 
+static void test_owned_stage_loading(const size_t seed, const float stdev) {
+    auto metadata = get_gguf_ctx(LLM_ARCH_GLM5_NEXT, true);
+    gguf_set_val_u32(metadata.get(), "glm5-next.block_count", 6);
+    const uint32_t heads[6] = {0, 1, 0, 1, 0, 1};
+    gguf_set_arr_data(metadata.get(), "glm5-next.attention.head_count_kv", GGUF_TYPE_UINT32, heads, 6);
+    tensor_data_params data{seed, stdev};
+    llama_model_params params = llama_model_default_params();
+    ggml_backend_dev_t cpu_only[] = {nullptr};
+    params.devices = cpu_only;
+    params.n_gpu_layers = 0;
+    params.load_mode = LLAMA_LOAD_MODE_NONE;
+    params.lazy_mode = LLAMA_LAZY_MODE_OFF;
+    params.progress_callback = silent_model_load_progress;
+    llama_model_ptr reference(llama_model_init_from_user(metadata.get(), set_tensor_data, &data, params));
+    if (!reference) { throw std::runtime_error("stage fixture reference did not load"); }
+
+    const auto directory = std::filesystem::temp_directory_path() /
+        ("glm owned stage fixture " + std::to_string(std::random_device{}()));
+    if (!std::filesystem::create_directory(directory)) {
+        throw std::runtime_error("cannot create isolated stage fixture directory");
+    }
+    struct cleanup {
+        std::filesystem::path path;
+        ~cleanup() { std::error_code error; std::filesystem::remove_all(path, error); }
+    } cleanup_directory{directory};
+    const auto path = directory / "model fixture.gguf";
+    llama_model_save_to_file(reference.get(), path.string().c_str());
+
+    std::map<std::string, ggml_tensor *> tensors;
+    for (const auto & entry : reference->tensors_by_name) { tensors.emplace(entry.first, entry.second); }
+    for (uint32_t rank = 0; rank < 3; ++rank) {
+        const llama_stage_model_params stage{1, rank, {2, 4, 6}};
+        std::set<std::string> expected;
+        for (const auto & entry : tensors) {
+            int layer = -1;
+            const bool layer_tensor = std::sscanf(entry.first.c_str(), "blk.%d.", &layer) == 1;
+            if ((layer_tensor && layer >= int(2 * rank) && layer < int(2 * rank + 2)) ||
+                    (entry.first == "token_embd.weight" && rank == 0) ||
+                    ((entry.first == "output.weight" || entry.first == "output_norm.weight") && rank == 2)) {
+                expected.insert(entry.first);
+            }
+        }
+        for (bool from_file : {false, true}) {
+            llama_model_ptr owned(from_file ? llama_model_load_stage_from_file(path.string().c_str(), params, stage) :
+                llama_model_init_stage_from_user(metadata.get(), set_tensor_data, &data, params, stage));
+            if (!owned || !owned->stage_enabled) { throw std::runtime_error("owned stage did not load"); }
+            std::set<std::string> actual;
+            for (const auto & entry : owned->tensors_by_name) {
+                actual.insert(entry.first);
+                const auto it = tensors.find(entry.first);
+                if (it == tensors.end() || ggml_nbytes(entry.second) != ggml_nbytes(it->second)) {
+                    throw std::runtime_error("unexpected owned tensor shape");
+                }
+                std::vector<uint8_t> a(ggml_nbytes(entry.second)), b(a.size());
+                ggml_backend_tensor_get(entry.second, a.data(), 0, a.size());
+                ggml_backend_tensor_get(it->second, b.data(), 0, b.size());
+                if (a != b) { throw std::runtime_error("owned tensor bytes differ from the complete model"); }
+            }
+            if (actual != expected) { throw std::runtime_error("owned tensor set has missing or unowned tensors"); }
+            uint64_t expected_bytes = 0;
+            for (const auto & name : expected) { expected_bytes += ggml_nbytes(tensors.at(name)); }
+            if (llama_model_size(owned.get()) != expected_bytes) { throw std::runtime_error("owned model byte count is incorrect"); }
+            llama_context_ptr forbidden(llama_init_from_model(owned.get(), llama_context_default_params()));
+            if (forbidden) { throw std::runtime_error("partial model admitted a monolithic context"); }
+            const auto rejected_export = directory / ("partial " + std::to_string(rank) + ".gguf");
+            llama_model_save_to_file(owned.get(), rejected_export.string().c_str());
+            if (std::filesystem::exists(rejected_export)) { throw std::runtime_error("partial model exported as a complete model"); }
+        }
+    }
+    for (const auto & bad : std::vector<llama_stage_model_params>{{2, 0, {2,4,6}}, {1,3,{2,4,6}},
+            {1,0,{0,4,6}}, {1,0,{2,2,6}}, {1,0,{2,4,5}}}) {
+        llama_model_ptr rejected(llama_model_init_stage_from_user(metadata.get(), set_tensor_data, &data, params, bad));
+        if (rejected) { throw std::runtime_error("invalid stage plan was accepted by model loading"); }
+    }
+    params.load_mode = LLAMA_LOAD_MODE_MMAP;
+    llama_model_ptr mapped(llama_model_load_stage_from_file(path.string().c_str(), params, {1,0,{2,4,6}}));
+    if (mapped) { throw std::runtime_error("stage loader accepted whole-file mmap/prefetch"); }
+    params.load_mode = LLAMA_LOAD_MODE_NONE;
+    params.load_mtp = true;
+    llama_model_ptr draft(llama_model_init_stage_from_user(metadata.get(), set_tensor_data, &data, params, {1,2,{2,4,6}}));
+    if (draft) { throw std::runtime_error("stage loader accepted unsupported MTP ownership"); }
+    params.load_mtp = false;
+    params.lazy_mode = LLAMA_LAZY_MODE_ON;
+    llama_model_ptr lazy(llama_model_load_stage_from_file(path.string().c_str(), params, {1,1,{2,4,6}}));
+    if (lazy) { throw std::runtime_error("stage loader accepted inference-time lazy model reads"); }
+    if (!std::filesystem::remove(path)) { throw std::runtime_error("stage fixture file remained open after loading"); }
+    LOG("Stage-owned loading: three ranks, provider/file bytes, invalid plans and monolithic refusal passed\n");
+}
+
 static std::vector<float> get_logits(
         llama_model * model, llama_context * lctx, const std::vector<llama_token> & tokens, bool encode = false) {
     const uint32_t n_vocab  = llama_vocab_n_tokens(llama_model_get_vocab(model));
@@ -1092,6 +1186,10 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
             if (arch == LLM_ARCH_BAILINGMOE3) {
                 GGML_ASSERT(gguf_remove_key(gguf_ctx.get(), "bailingmoe3.kda.safe_gate") >= 0);
             }
+            if (arch == LLM_ARCH_GLM5_NEXT && (!target_backend || std::strcmp(target_backend, "CPU") == 0)) {
+                test_owned_stage_loading(seed, stdev);
+                ++n_tests;
+            }
             std::pair<llama_model_ptr, llama_context_ptr> model_and_ctx_cpu;
             std::vector<float> logits_cpu;
             for (device_config & dc : dev_configs) {
@@ -1226,7 +1324,8 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
     }
 
     llama_log_set(ud.log_old.callback, ud.log_old.user_data);
-    return all_ok ? 0 : 1;
+    common_log_flush(common_log_main());
+    return all_ok && n_tests > 0 ? 0 : 1;
 }
 
 int main(int argc, char ** argv) {

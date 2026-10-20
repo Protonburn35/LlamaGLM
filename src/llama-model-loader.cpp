@@ -1390,6 +1390,20 @@ struct ggml_tensor * llama_model_loader::create_tensor(
     return tensor;
 }
 
+void llama_model_loader::exclude_tensors(const std::function<bool(const std::string &)> & exclude) {
+    if (n_created != 0 || !ctx_map.empty()) {
+        throw std::logic_error("tensor exclusion must precede tensor creation");
+    }
+    for (auto entry = weights_map.begin(); entry != weights_map.end();) {
+        if (exclude(entry->first)) {
+            ++n_created;
+            entry = weights_map.erase(entry);
+        } else {
+            ++entry;
+        }
+    }
+}
+
 void llama_model_loader::done_getting_tensors(bool partial) const {
     if (n_created > n_tensors) {
         throw std::runtime_error(format("%s: too many tensors created; expected %d, got %d", __func__, n_tensors, n_created));

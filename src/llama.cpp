@@ -314,7 +314,8 @@ static bool llama_prepare_model_devices(const llama_model_params & params, llama
 
 // Returns 0 on success, -1 on error, and -2 on cancellation via llama_progress_callback
 static std::pair<int, llama_model *> llama_model_load(struct gguf_context * metadata, llama_model_set_tensor_data_t set_tensor_data, void * set_tensor_data_ud,
-        const std::string & fname, std::vector<std::string> & splits, FILE * file, llama_model_params & params) {
+        const std::string & fname, std::vector<std::string> & splits, FILE * file, llama_model_params & params,
+        const llama_stage_model_params * stage) {
     try {
         llama_model_loader ml(metadata, set_tensor_data, set_tensor_data_ud, fname, splits, file, params.load_mode,
             params.check_tensors, params.no_alloc, params.load_mtp, params.kv_overrides, params.tensor_buft_overrides);
@@ -348,6 +349,13 @@ static std::pair<int, llama_model *> llama_model_load(struct gguf_context * meta
             model->load_hparams(ml);
         } catch(const std::exception & e) {
             throw std::runtime_error("error loading model hyperparameters: " + std::string(e.what()));
+        }
+        if (stage) {
+            if (model->arch != LLM_ARCH_GLM5_NEXT || stage->layer_ends[2] != model->hparams.n_layer()) {
+                throw std::invalid_argument("stage plan must cover the complete GLM5Next target graph");
+            }
+            model->stage = *stage;
+            model->stage_enabled = true;
         }
         if (model->arch == LLM_ARCH_CLIP) {
             throw std::runtime_error("CLIP cannot be used as main model, use it with --mmproj instead");
@@ -384,7 +392,8 @@ static struct llama_model * llama_model_load_from_file_impl(
         const std::string & path_model,
         std::vector<std::string> & splits,
         FILE * file,
-        struct llama_model_params params) {
+        struct llama_model_params params,
+        const llama_stage_model_params * stage = nullptr) {
     {
         int n_sources_defined = 0;
         if (metadata != nullptr) {
@@ -400,6 +409,13 @@ static struct llama_model * llama_model_load_from_file_impl(
             LLAMA_LOG_ERROR("%s: exactly one out metadata, path_model, and file must be defined\n", __func__);
             return nullptr;
         }
+    }
+    if (stage && (stage->version != 1 || stage->rank > 2 || stage->layer_ends[0] == 0 ||
+            stage->layer_ends[0] >= stage->layer_ends[1] || stage->layer_ends[1] >= stage->layer_ends[2] ||
+            params.load_mtp || params.vocab_only || params.lazy_mode != LLAMA_LAZY_MODE_OFF ||
+            (!metadata && params.load_mode != LLAMA_LOAD_MODE_NONE))) {
+        LLAMA_LOG_ERROR("%s: unsupported stage version/rank/ranges or load mode; use three nonempty target stages, buffered NONE, no lazy reads or MTP\n", __func__);
+        return nullptr;
     }
     // TODO: remove
     ggml_time_init();
@@ -426,7 +442,7 @@ static struct llama_model * llama_model_load_from_file_impl(
         };
     }
 
-    const auto [status, model] = llama_model_load(metadata, set_tensor_data, set_tensor_data_ud, path_model, splits, file, params);
+    const auto [status, model] = llama_model_load(metadata, set_tensor_data, set_tensor_data_ud, path_model, splits, file, params, stage);
     GGML_ASSERT(status <= 0);
     if (status < 0) {
         if (status == -1) {
@@ -470,6 +486,29 @@ struct llama_model * llama_model_load_from_file(
     return llama_model_load_from_file_impl(nullptr, nullptr, nullptr, path_model, splits, /*file*/ nullptr, params);
 }
 
+struct llama_model * llama_model_load_stage_from_file(
+        const char * path_model, struct llama_model_params params, struct llama_stage_model_params stage) {
+    if (!path_model) {
+        LLAMA_LOG_ERROR("%s: model path cannot be null\n", __func__);
+        return nullptr;
+    }
+    std::vector<std::string> splits;
+    return llama_model_load_from_file_impl(nullptr, nullptr, nullptr, path_model, splits, nullptr, params, &stage);
+}
+
+struct llama_model * llama_model_init_stage_from_user(
+        struct gguf_context * metadata, llama_model_set_tensor_data_t set_tensor_data,
+        void * set_tensor_data_ud, struct llama_model_params params, struct llama_stage_model_params stage) {
+    if (!metadata || (!params.no_alloc && !set_tensor_data)) {
+        LLAMA_LOG_ERROR("%s: metadata and a tensor provider are required\n", __func__);
+        return nullptr;
+    }
+    params.load_mode = LLAMA_LOAD_MODE_NONE;
+    params.use_extra_bufts = false;
+    std::vector<std::string> splits;
+    return llama_model_load_from_file_impl(metadata, set_tensor_data, set_tensor_data_ud, "", splits, nullptr, params, &stage);
+}
+
 struct llama_model * llama_model_load_from_splits(
         const char ** paths,
         size_t n_paths,
@@ -497,6 +536,10 @@ struct llama_model * llama_model_load_from_file_ptr(FILE * file, struct llama_mo
 }
 
 void llama_model_save_to_file(const struct llama_model * model, const char * path_model) {
+    if (model && model->stage_enabled) {
+        LLAMA_LOG_ERROR("%s: partial stage models cannot be saved as complete GGUF models\n", __func__);
+        return;
+    }
     llama_model_saver ms(model);
     ms.add_kv_from_model();
     ms.add_tensors_from_model();

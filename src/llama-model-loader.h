@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -72,6 +73,8 @@ struct llama_model_loader {
     int n_kv      = 0;
     int n_tensors = 0;
     int n_created = 0;
+
+    void exclude_tensors(const std::function<bool(const std::string &)> & exclude);
 
     uint64_t n_elements = 0;
     size_t   n_bytes    = 0;

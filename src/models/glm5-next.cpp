@@ -68,12 +68,26 @@ void llama_model_glm5_next::load_arch_tensors(llama_model_loader & ml) {
     const int trunk_flags = nf.trunk;
     const int mtp_flags   = nf.mtp;
 
-    tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
+    if (stage_enabled) {
+        ml.exclude_tensors([&](const std::string & name) { return !stage_owns_tensor(name); });
+    }
 
-    output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
-    output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab}, 0);
+    if (!stage_enabled || stage.rank == 0) {
+        tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
+    }
+
+    if (!stage_enabled || stage.rank == 2) {
+        output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
+        output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab}, 0);
+    }
 
     for (int i = 0; i < n_layer_all; ++i) {
+        if (stage_enabled) {
+            const uint32_t begin = stage.rank == 0 ? 0 : stage.layer_ends[stage.rank - 1];
+            if (uint32_t(i) < begin || uint32_t(i) >= stage.layer_ends[stage.rank]) {
+                continue;
+            }
+        }
         auto & layer = layers[i];
 
         const bool is_nextn = i >= n_layer;

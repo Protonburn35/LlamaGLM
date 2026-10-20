@@ -1,6 +1,7 @@
 #pragma once
 
 #include "llama.h"
+#include "llama-stage.h"
 #include "llama-arch.h"
 #include "llama-graph.h"
 #include "llama-hparams.h"
@@ -713,6 +714,10 @@ struct llama_model {
 
     llama_hparams hparams = {};
     llama_vocab   vocab;
+
+    bool stage_enabled = false;
+    llama_stage_model_params stage = {};
+    bool stage_owns_tensor(const std::string & name) const;
 
     // per-tensor activation precision policy
     llama_prec_policy prec_policy;

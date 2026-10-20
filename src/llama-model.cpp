@@ -1333,6 +1333,35 @@ void llama_prec_policy::load(llama_model_loader & ml, const llama_model & model)
     }
 }
 
+bool llama_model::stage_owns_tensor(const std::string & name) const {
+    if (!stage_enabled) {
+        return true;
+    }
+    if (name.compare(0, 11, "token_embd.") == 0) {
+        return stage.rank == 0;
+    }
+    if (name.compare(0, 7, "output.") == 0 || name.compare(0, 12, "output_norm.") == 0) {
+        return stage.rank == 2;
+    }
+    if (name.compare(0, 4, "blk.") == 0) {
+        const size_t dot = name.find('.', 4);
+        if (dot != std::string::npos && dot > 4 && dot - 4 <= 3) {
+            uint32_t layer = 0;
+            bool canonical = dot == 5 || name[4] != '0';
+            for (size_t i = 4; i < dot; ++i) {
+                if (name[i] < '0' || name[i] > '9') { canonical = false; break; }
+                layer = layer * 10 + uint32_t(name[i] - '0');
+            }
+            if (canonical && layer < hparams.n_layer_all) {
+                const uint32_t begin = stage.rank == 0 ? 0 : stage.layer_ends[stage.rank - 1];
+                return layer >= begin && layer < stage.layer_ends[stage.rank];
+            }
+        }
+    }
+    // Keep unknown names visible to the loader's strict unconsumed-tensor check.
+    return true;
+}
+
 llama_model::llama_model(const llama_model_params & params) : params(params), pimpl(std::make_unique<impl>()) {
     if (params.tensor_split != nullptr) {
         // llama_model_params stores tensor_split as a borrowed pointer, but the model
@@ -1885,6 +1914,21 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         for (auto * cur = ggml_get_first_tensor(ctx_ptr.get()); cur != NULL; cur = ggml_get_next_tensor(ctx_ptr.get(), cur)) {
             tensors_by_name.emplace_back(ggml_get_name(cur), cur);
         }
+    }
+    if (stage_enabled) {
+        pimpl->n_bytes = 0;
+        pimpl->n_elements = 0;
+        for (const auto & entry : tensors_by_name) {
+            const size_t bytes = ggml_nbytes(entry.second);
+            const uint64_t elements = uint64_t(ggml_nelements(entry.second));
+            if (bytes > SIZE_MAX - pimpl->n_bytes || elements > UINT64_MAX - pimpl->n_elements) {
+                throw std::overflow_error("owned model size overflow");
+            }
+            pimpl->n_bytes += bytes;
+            pimpl->n_elements += elements;
+        }
+        LLAMA_LOG_INFO("%s: stage %u owns %zu tensors, %zu payload bytes; stage evaluation is not implemented\n",
+                       __func__, stage.rank, tensors_by_name.size(), pimpl->n_bytes);
     }
 
     // per-tensor activation precision policy

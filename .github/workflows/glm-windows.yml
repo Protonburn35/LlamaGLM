@@ -46,6 +46,12 @@ jobs:
           python --version
           Get-CimInstance Win32_OperatingSystem | Select-Object Caption, TotalVisibleMemorySize, FreePhysicalMemory
           Get-PSDrive C | Select-Object Used, Free
+      - name: Restore bounded compiler cache
+        uses: ggml-org/ccache-action@f09c25b45002a07be2955cbe52e8cee55643f89d # v1.2.24
+        with:
+          key: glm-win2022-static-${{ matrix.backend }}-cuda128-cccl-e46b01ff
+          max-size: 2G
+          install: binary
       - name: Install verified CUDA 12.8.1 components
         if: matrix.backend == 'cuda'
         shell: pwsh
@@ -66,8 +72,8 @@ jobs:
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           if errorlevel 1 exit /b 1
           set "GLM_CUDA_FLAGS=-DGGML_CUDA=OFF"
-          if "%GLM_BACKEND%"=="cuda" set "GLM_CUDA_FLAGS=-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=%CUDA_ARCHS% -DGGML_CUDA_CCCL_VERSION=%CCCL_SHA% -DFETCHCONTENT_SOURCE_DIR_CCCL=%RUNNER_TEMP%/cccl"
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_APP=OFF %GLM_CUDA_FLAGS%
+          if "%GLM_BACKEND%"=="cuda" set "GLM_CUDA_FLAGS=-DGGML_CUDA=ON -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache -DCMAKE_CUDA_ARCHITECTURES=%CUDA_ARCHS% -DGGML_CUDA_CCCL_VERSION=%CCCL_SHA% -DFETCHCONTENT_SOURCE_DIR_CCCL=%RUNNER_TEMP%/cccl"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DGGML_NATIVE=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_APP=OFF %GLM_CUDA_FLAGS%
           if errorlevel 1 exit /b 1
           cmake --build build --parallel 2 --target llama-glm-plan test-glm-stage test-gguf test-llama-archs llama-server llama-cli
           if errorlevel 1 exit /b 1

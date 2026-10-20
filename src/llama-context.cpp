@@ -4026,6 +4026,11 @@ llama_context * llama_init_from_model(
         return nullptr;
     }
 
+    if (model->stage_enabled) {
+        LLAMA_LOG_ERROR("%s: partial stage models require the stage evaluator, which is not implemented yet\n", __func__);
+        return nullptr;
+    }
+
     if (params.n_batch == 0 && params.n_ubatch == 0) {
         LLAMA_LOG_ERROR("%s: n_batch and n_ubatch cannot both be zero\n", __func__);
         return nullptr;

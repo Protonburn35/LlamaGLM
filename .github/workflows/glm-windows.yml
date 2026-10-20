@@ -31,9 +31,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        backend: [cpu, cuda]
+        include:
+          - backend: cpu
+            cuda: false
+            architectures: ''
+          - backend: cuda-sm89
+            cuda: true
+            architectures: '89-real'
+          - backend: cuda-sm120
+            cuda: true
+            architectures: '120a-real'
     env:
-      CUDA_ARCHS: '89-real;120-real'
+      CUDA_ARCHS: ${{ matrix.architectures }}
       CCCL_SHA: e46b01ff821f3badeea858f0124ce00a7dd7d05a
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -52,12 +61,13 @@ jobs:
           key: glm-win2022-static-${{ matrix.backend }}-cuda128-cccl-e46b01ff
           max-size: 2G
           install: binary
+          append-timestamp: false
       - name: Install verified CUDA 12.8.1 components
-        if: matrix.backend == 'cuda'
+        if: matrix.cuda
         shell: pwsh
         run: ./scripts/glm-install-cuda.ps1 -InstallDirectory "$env:RUNNER_TEMP/cuda-12.8.1"
       - name: Fetch pinned CCCL
-        if: matrix.backend == 'cuda'
+        if: matrix.cuda
         shell: pwsh
         run: |
           git clone --filter=blob:none --no-checkout https://github.com/NVIDIA/cccl.git "$env:RUNNER_TEMP/cccl"
@@ -68,15 +78,27 @@ jobs:
         shell: cmd
         env:
           GLM_BACKEND: ${{ matrix.backend }}
+          GLM_ENABLE_CUDA: ${{ matrix.cuda }}
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           if errorlevel 1 exit /b 1
           set "GLM_CUDA_FLAGS=-DGGML_CUDA=OFF"
-          if "%GLM_BACKEND%"=="cuda" set "GLM_CUDA_FLAGS=-DGGML_CUDA=ON -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache -DCMAKE_CUDA_ARCHITECTURES=%CUDA_ARCHS% -DGGML_CUDA_CCCL_VERSION=%CCCL_SHA% -DFETCHCONTENT_SOURCE_DIR_CCCL=%RUNNER_TEMP%/cccl"
+          if "%GLM_ENABLE_CUDA%"=="true" set "GLM_CUDA_FLAGS=-DGGML_CUDA=ON -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache -DCMAKE_CUDA_ARCHITECTURES=%CUDA_ARCHS% -DGGML_CUDA_FA_QUANTS=f16-f16;bf16-bf16 -DGGML_CUDA_CCCL_VERSION=%CCCL_SHA% -DFETCHCONTENT_SOURCE_DIR_CCCL=%RUNNER_TEMP%/cccl"
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DGGML_NATIVE=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_APP=OFF %GLM_CUDA_FLAGS%
           if errorlevel 1 exit /b 1
           cmake --build build --parallel 2 --target llama-glm-plan test-glm-stage test-gguf test-llama-archs llama-server llama-cli
           if errorlevel 1 exit /b 1
+          dumpbin /dependents build\bin\test-gguf.exe > build\dll-dependencies.txt
+          if errorlevel 1 exit /b 1
+      - name: Expose verified CUDA runtime DLL directories
+        if: matrix.cuda
+        shell: pwsh
+        run: |
+          foreach ($Name in @('cudart64_12.dll', 'cublas64_12.dll', 'cublasLt64_12.dll')) {
+            $Files = @(Get-ChildItem -LiteralPath $env:CUDA_PATH -Recurse -File -Filter $Name)
+            if ($Files.Count -ne 1) { throw "Expected one verified CUDA runtime file: $Name" }
+            $Files[0].DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
       - name: Run CPU ownership and GGUF tests
         shell: pwsh
         run: |
@@ -118,6 +140,7 @@ jobs:
             glm-cpu-fixture.log
             build/Testing/Temporary/LastTest.log
             build/CMakeCache.txt
+            build/dll-dependencies.txt
             build/bin/*.exe
             build/bin/*.dll
             LICENSE

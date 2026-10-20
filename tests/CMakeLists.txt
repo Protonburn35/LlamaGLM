@@ -135,6 +135,10 @@ function(llama_build_and_test source)
 endfunction()
 
 # build test-tokenizer-0 target once and add many tests
+if (LLAMA_BUILD_TOOLS AND NOT EMSCRIPTEN)
+    llama_build_and_test(test-glm-stage.cpp LINK llama-glm-stage-plan)
+endif()
+
 llama_build(test-tokenizer-0.cpp)
 
 llama_test(test-tokenizer-0 NAME test-tokenizer-0-bert-bge          ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-bert-bge.gguf)

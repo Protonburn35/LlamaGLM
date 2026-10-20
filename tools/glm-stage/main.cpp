@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <map>
 #include <set>
 #include <stdexcept>
 
@@ -53,6 +54,18 @@ gguf_ptr load_header(const std::string & path) {
         throw std::runtime_error("cannot open GGUF header");
     }
     header_reader reader{file.get()};
+    unsigned char fixed[24];
+    if (read_header(&reader, fixed, 0, sizeof(fixed)) != sizeof(fixed)) {
+        throw std::invalid_argument("truncated GGUF fixed header");
+    }
+    const auto count_at = [&](size_t start) {
+        uint64_t value = 0;
+        for (size_t i = 0; i < 8; ++i) { value |= uint64_t(fixed[start + i]) << (8 * i); }
+        return value;
+    };
+    if (count_at(8) > 100000 || count_at(16) > 10000) {
+        throw std::invalid_argument("GGUF metadata count exceeds planner limits");
+    }
     gguf_ptr ctx(gguf_init_from_callback(read_header, &reader, 65536, header_limit, {true, nullptr}), &gguf_free);
     if (!ctx) {
         throw std::runtime_error("invalid, truncated or oversized GGUF metadata");
@@ -130,6 +143,9 @@ json make_manifest(const std::vector<std::string> & paths, const glm_stage::plan
     std::set<uint32_t> seen_shards;
     std::set<std::string> seen_tensors;
     std::set<uint32_t> seen_layers;
+    std::map<uint32_t, std::set<std::string>> layer_tensors;
+    uint64_t input_embedding_bytes = 0;
+    bool draft_has_embedding = false;
     for (size_t index = 0; index < paths.size(); ++index) {
         auto ctx = index == 0 ? std::move(first) : load_header(paths[index]);
         const uint32_t number = split_value(ctx.get(), "split.no");
@@ -148,9 +164,17 @@ json make_manifest(const std::vector<std::string> & paths, const glm_stage::plan
             const uint64_t bytes = gguf_get_tensor_size(ctx.get(), t);
             const uint64_t offset = glm_stage::checked_add(gguf_get_data_offset(ctx.get()), gguf_get_tensor_offset(ctx.get(), t));
             glm_stage::checked_add(offset, bytes);
-            if (owner.routed_experts && shape[2] != model.experts) {
-                throw std::invalid_argument("expert tensor does not contain every routed expert: " + name);
+            uint64_t bytes_per_expert = 0;
+            if (owner.routed_experts) {
+                bytes_per_expert = glm_stage::expert_file_span(model, shape, offset, bytes, 0).bytes;
+                const bool down = name.find(".ffn_down_exps.") != std::string::npos;
+                if ((down && shape[0] != 2048) || (!down && shape[0] != model.hidden)) {
+                    throw std::invalid_argument("routed-expert projection has incorrect orientation");
+                }
             }
+            if (name == "token_embd.weight") { input_embedding_bytes = bytes; }
+            if (name == "blk.45.nextn.embed_tokens.weight") { draft_has_embedding = true; }
+            if (owner.layer >= 0) { layer_tensors[uint32_t(owner.layer)].insert(name.substr(name.find('.', 4) + 1)); }
             if (owner.layer >= 0 && owner.role == glm_stage::tensor_role::trunk) {
                 seen_layers.insert(uint32_t(owner.layer));
             }
@@ -163,7 +187,8 @@ json make_manifest(const std::vector<std::string> & paths, const glm_stage::plan
             result["tensors"].push_back({{"name", name}, {"shard", number}, {"offset", offset}, {"bytes", bytes},
                 {"shape", {shape[0], shape[1], shape[2], shape[3]}},
                 {"type", ggml_type_name(gguf_get_tensor_type(ctx.get(), t))}, {"rank", owner.rank},
-                {"layer", owner.layer}, {"role", role_name(owner.role)}, {"routed_experts", owner.routed_experts}});
+                {"layer", owner.layer}, {"role", role_name(owner.role)}, {"routed_experts", owner.routed_experts},
+                {"bytes_per_expert", bytes_per_expert}});
         }
     }
     if (seen_tensors.size() != tensor_count || seen_layers.size() != model.layers ||
@@ -171,11 +196,22 @@ json make_manifest(const std::vector<std::string> & paths, const glm_stage::plan
             !seen_tensors.count("output_norm.weight")) {
         throw std::invalid_argument("incomplete model tensor inventory");
     }
+    for (uint32_t layer = 0; layer < model.layers + model.nextn_layers; ++layer) {
+        const auto & names = layer_tensors[layer];
+        for (const auto * projection : {"gate", "up", "down"}) {
+            const std::string prefix = std::string("ffn_") + projection;
+            const std::string required = prefix + (layer < 3 ? ".weight" : "_exps.weight");
+            if (!names.count(required) || (layer >= 3 && !names.count(prefix + "_shexp.weight"))) {
+                throw std::invalid_argument("missing required dense/routed/shared projection at layer " + std::to_string(layer));
+            }
+        }
+    }
     for (auto & stage : result["stages"]) {
         stage["all_weights_resident_lower_bound_bytes"] = glm_stage::checked_add(stage["model_weights_bytes"].get<uint64_t>(),
                                                                   stage["target_state_bytes"].get<uint64_t>());
     }
     result["draft_state_bytes_if_enabled"] = glm_stage::checked_mul(split.context, (model.kv_latent + 3ULL * model.index_head) * 2);
+    result["draft_embedding_mirror_bytes_if_enabled"] = draft_has_embedding ? 0 : input_embedding_bytes;
     result["tensor_count"] = seen_tensors.size();
     return result;
 }

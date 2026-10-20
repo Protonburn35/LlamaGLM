@@ -74,7 +74,7 @@ jobs:
       - name: Run CPU ownership and GGUF tests
         shell: pwsh
         run: |
-          ctest --test-dir build -R '^(test-glm-stage|test-gguf)$' --output-on-failure
+          ctest --test-dir build -R '^(test-glm-stage|test-glm-plan|test-gguf)$' --output-on-failure
           if ($LASTEXITCODE -ne 0) { throw 'CPU tests failed' }
           ./build/bin/test-llama-archs.exe --arch glm5-next --backend CPU --seed 53 -v 5 *> glm-cpu-fixture.log
           if ($LASTEXITCODE -ne 0) { throw 'GLM CPU fixture failed' }

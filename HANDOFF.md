@@ -10,12 +10,12 @@ Current limits: no owned-layer execution, stage RPC, desktop SSD provider, lapto
 
 CPU verification: `test-glm-stage`, `test-gguf` and the existing `test-llama-archs --arch glm5-next --backend CPU --seed 53 -v 5` pass on the cloud machine. The latter reports one completed architecture test, with roundtrip and mixed/chunked-batch checks. No GPU or full-model inference ran.
 
-Windows build: workflow `.github/workflows/glm-windows.yml` builds native CPU and CUDA 12.8.1 application targets (SM89 and SM120a), then CPU fixtures. First run `39511902026` at `831afe27b1ce4d43eb1b3e25f9c99befb98602d5` failed before compiling: Windows shared libraries disable the internal architecture fixture target. Static-library configuration is the diagnosed fix; rebuild pending. No passing Windows SHA/artifact exists yet. Update `docs/BUILD_LOG.md` and this file after observing actual runs.
+Windows build: workflow `.github/workflows/glm-windows.yml` builds native CPU and CUDA 12.8.1 application targets (SM89 and SM120a), then CPU fixtures. Best Windows CPU-tested SHA is `acae9b6aa05bfaed97f10f50be2bac2f223530d6`, run `39512089611`, artifact `12305654727`. CUDA job `118935342013` is still compiling. First run `39511902026` failed before compiling because Windows shared libraries disable the internal architecture fixture; static libraries fixed that. New expert-span/parser regression changes after acae9b6aa are locally tested but await Windows validation. Update `docs/BUILD_LOG.md` and this file after observing actual runs.
 
 Next actions:
 
 1. Push this reviewed checkpoint; inspect the exact Windows run and fix toolchain/build/test failures.
-2. Add independent metadata-parser and quant-inventory regression tests, including malformed headers and complete projection ownership checks.
+2. Extend the now-tested metadata parser/FFN projection inventory to a complete source-derived attention/KDA tensor schema. Eight native-planner integration cases and expert slab-bound tests are present locally; build them on Windows after pushing this next checkpoint.
 3. Introduce an experimental owned-layer graph/loader interface, preserving the upstream monolithic graph as an oracle. Filter weights and KDA/DSA/index state by the same validated range; pass all four FP32 mHC streams across boundaries. Graph inputs, scheduler outputs and terminal head need explicit handling. Never emulate ownership by computing unowned layers elsewhere.
 4. Implement bounded native transport and state transactions, then desktop SSD tiers and fail-closed resident laptop provider. Read `docs/ARCHITECTURE.md`, `docs/RPC_PROTOCOL.md`, `docs/MEMORY_PLAN.md` and `docs/OPEN_ISSUES.md` first.
 

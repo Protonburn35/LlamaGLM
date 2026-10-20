@@ -196,6 +196,22 @@ uint64_t state_budget::total() const {
     return checked_add(checked_add(mla_bytes, index_bytes), recurrent_bytes);
 }
 
+expert_span expert_file_span(const geometry & model, const int64_t * shape, uint64_t tensor_offset,
+                             uint64_t tensor_bytes, uint32_t expert) {
+    model.validate();
+    if (shape == nullptr || shape[2] != model.experts || shape[3] != 1 || expert >= model.experts ||
+            tensor_bytes == 0 || tensor_bytes % model.experts != 0) {
+        throw std::invalid_argument("invalid routed-expert tensor or expert index");
+    }
+    if (!((shape[0] == model.hidden && shape[1] == 2048) ||
+            (shape[0] == 2048 && shape[1] == model.hidden))) {
+        throw std::invalid_argument("unexpected routed-expert projection shape");
+    }
+    checked_add(tensor_offset, tensor_bytes);
+    const uint64_t slab = tensor_bytes / model.experts;
+    return {checked_add(tensor_offset, checked_mul(slab, expert)), slab};
+}
+
 std::array<state_budget, 3> state_budgets(const plan & split, const geometry & model, uint32_t rollback_rows) {
     model.validate();
     split.validate(model.layers);

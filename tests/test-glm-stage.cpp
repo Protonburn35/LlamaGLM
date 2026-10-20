@@ -87,6 +87,18 @@ int main() {
         refuses([&] { checked_mul(std::numeric_limits<uint64_t>::max(), 2); });
         refuses([&] { checked_add(std::numeric_limits<uint64_t>::max(), 1); });
 
+        const int64_t shape[4] = {4096, 2048, 288, 1};
+        const uint64_t tensor_bytes = 288ULL * 4096 * 2048; // one-byte fixture encoding, not an inference quant
+        const auto first = expert_file_span(model, shape, 38304, tensor_bytes, 0);
+        const auto last = expert_file_span(model, shape, 38304, tensor_bytes, 287);
+        require(first.offset == 38304 && first.bytes == 8388608, "first expert slab");
+        require(last.offset + last.bytes == 38304 + tensor_bytes, "last expert slab has exact tensor endpoint");
+        refuses([&] { expert_file_span(model, shape, 0, tensor_bytes, 288); });
+        refuses([&] { expert_file_span(model, shape, 0, tensor_bytes - 1, 0); });
+        refuses([&] { expert_file_span(model, shape, std::numeric_limits<uint64_t>::max(), tensor_bytes, 0); });
+        const int64_t wrong_shape[4] = {4096, 2048, 288, 2};
+        refuses([&] { expert_file_span(model, wrong_shape, 0, tensor_bytes, 0); });
+
         gguf_context * metadata = gguf_init_empty();
         gguf_set_val_str(metadata, "general.architecture", "glm5-next");
         gguf_set_val_str(metadata, "glm5-next.block_count", "46");

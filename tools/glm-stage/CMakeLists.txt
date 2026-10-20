@@ -7,6 +7,12 @@ set_target_properties(llama-glm-stage-plan PROPERTIES POSITION_INDEPENDENT_CODE 
 add_executable(llama-glm-plan main.cpp)
 target_link_libraries(llama-glm-plan PRIVATE llama-glm-stage-plan vendor::nlohmann)
 
+if (LLAMA_BUILD_TESTS)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME test-glm-plan COMMAND ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/tests/test-glm-plan.py --executable $<TARGET_FILE:llama-glm-plan>)
+endif()
+
 if(LLAMA_TOOLS_INSTALL)
     install(TARGETS llama-glm-plan RUNTIME)
 endif()

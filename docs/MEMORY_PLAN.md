@@ -12,7 +12,7 @@ The machine-readable inventory is `docs/models/glm53-ud-iq3xxs.json`, generated 
 
 These are tensor payload sizes and persistent numerical-state arrays, not a Windows admission result. The all-resident column is a lower bound for an all-weights-resident placement; desktops may later keep cold experts on local SSD. RAM and VRAM are separate physical budgets. The apparent laptop headroom does not prove residency, working-set locking, WDDM availability or allocation success.
 
-Per DSA layer, FP16 latent MLA requires `1048576 * 512 * 2 = 1 GiB`; index rows require `1048576 * 128 * 3 * 2 = 0.75 GiB`. Eleven trunk DSA layers therefore need 19.25 GiB total, split 8.75 / 1.75 / 8.75 GiB. BF16 rows have the same byte size. One optional DSA NextN context would add another 1.75 GiB at 1M before metadata/workspace; it is not enabled.
+Per DSA layer, FP16 latent MLA requires `1048576 * 512 * 2 = 1 GiB`; index rows require `1048576 * 128 * 3 * 2 = 0.75 GiB`. Eleven trunk DSA layers therefore need 19.25 GiB total, split 8.75 / 1.75 / 8.75 GiB. BF16 rows have the same byte size. One optional DSA NextN context would add another 1.75 GiB at 1M before metadata/workspace; it is not enabled. The published draft block has no private token embedding: terminal MTP would additionally require a local copy of the input table, or an explicitly validated FP32 token-embedding input from A. The manifest reports the conditional mirror byte count instead of hiding this dependency in the draft total.
 
 Source `llama_hparams::n_embd_r/n_embd_s` gives each KDA layer `3*(4-1)*64*128 = 73728` convolution values and `64*128*128 = 1048576` recurrent values. `llama_model::create_memory` uses FP32 for both. One sequence with no speculative rollback needs 4,489,216 bytes/layer. The 17 / 4 / 13 KDA split contributes the remaining state in the table. Speculative recurrent snapshots multiply those arrays by `1 + n_rs_seq`; they are not free and are not yet planned into runtime admission.
 
@@ -26,3 +26,16 @@ build/bin/llama-glm-plan --output memory.json /path/to/new-headers/*.header
 ```
 
 Use headers in lexical shard order. Explicit `--split 21,6,18` or neighboring complete splits can be compared; defaults never shrink the context. B must preload every assigned expert, establish resident RAM/VRAM storage, warm/touch required state and fail closed on unestablished residency or later pressure. Mmap alone is insufficient. No runtime provider implementing this guarantee exists yet.
+
+Measured metadata-only comparisons at the same 1M context are saved in `docs/models/glm53-splits.json`. Columns below are all target weights plus numerical state, in GiB, before all runtime/OS reserves:
+
+| Split A/B/C | A | B | C |
+| --- | ---: | ---: | ---: |
+| 22/5/18 | 59.190 | 14.463 | 55.224 |
+| 21/5/19 | 56.647 | 14.463 | 57.767 |
+| 22/4/19 | 59.190 | 11.919 | 57.767 |
+| 21/6/18 | 56.647 | 17.006 | 55.224 |
+| 23/5/17 | 61.733 | 16.209 | 50.934 |
+| 20/6/19 | 54.104 | 17.006 | 57.767 |
+
+The 23/5/17 middle range owns two DSA layers, unlike 22/5/18. No final split or Windows residency result is inferred from this comparison. The candidate remains 22/5/18 pending allocator, residency and workload measurements.

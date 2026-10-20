@@ -61,6 +61,15 @@ struct tensor_owner {
 
 tensor_owner assign_tensor(const plan & split, const geometry & model, const std::string & name);
 
+struct expert_span {
+    uint64_t offset;
+    uint64_t bytes;
+};
+
+// GGUF routed-expert tensors store complete expert slabs on dimension 2.
+expert_span expert_file_span(const geometry & model, const int64_t * shape, uint64_t tensor_offset,
+                             uint64_t tensor_bytes, uint32_t expert);
+
 struct state_budget {
     uint32_t kda_layers = 0;
     uint32_t dsa_layers = 0;

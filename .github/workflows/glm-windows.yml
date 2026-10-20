@@ -67,7 +67,7 @@ jobs:
           if errorlevel 1 exit /b 1
           set "GLM_CUDA_FLAGS=-DGGML_CUDA=OFF"
           if "%GLM_BACKEND%"=="cuda" set "GLM_CUDA_FLAGS=-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=%CUDA_ARCHS% -DGGML_CUDA_CCCL_VERSION=%CCCL_SHA% -DFETCHCONTENT_SOURCE_DIR_CCCL=%RUNNER_TEMP%/cccl"
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_APP=OFF %GLM_CUDA_FLAGS%
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_APP=OFF %GLM_CUDA_FLAGS%
           if errorlevel 1 exit /b 1
           cmake --build build --parallel 2 --target llama-glm-plan test-glm-stage test-gguf test-llama-archs llama-server llama-cli
           if errorlevel 1 exit /b 1
@@ -114,3 +114,4 @@ jobs:
             build/CMakeCache.txt
             build/bin/*.exe
             build/bin/*.dll
+            LICENSE

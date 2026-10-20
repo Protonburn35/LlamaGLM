@@ -9,3 +9,9 @@ Setup fixes during development: the new test was initially gated on a target cre
 Actions administration-policy endpoint returned 403 for the integration; ordinary repository metadata, Git read, branch read and Actions run listing worked. Actual Windows workflow execution remains pending the first push; the administration endpoint denial alone does not establish Actions are unavailable.
 
 Windows run URL/ID, source SHA, failed step, root cause and fix SHA will be appended after actual execution. No Windows artifacts have been published at this checkpoint. GPU, three-process TCP, three-PC model and 1M runtime tests have not run.
+
+## 2026-10-20 - Windows candidate 831afe27b
+
+Source: `831afe27b1ce4d43eb1b3e25f9c99befb98602d5`. [Run 39511902026](https://github.com/Protonburn35/LlamaGLM/actions/runs/39511902026), Windows Server 2022, MSVC, CPU/CUDA matrix. CPU configure succeeded; compile step failed before compiling because `test-llama-archs` is deliberately not created for Windows shared-library builds (it calls internal symbols). Fix: configure static llama libraries, preserving the real fixture and application targets. The CUDA job was still installing when this failure was diagnosed; cancel the superseded run and rebuild with the supported static configuration. The CPU artifact contains configuration evidence only, not passing binaries.
+
+An unrelated inherited `build-cann.yml` also emitted a no-job failure ([39511897270](https://github.com/Protonburn35/LlamaGLM/actions/runs/39511897270)); its jobs are commented out in the pinned upstream file. It is not evidence about the GLM Windows build. No upstream CANN workflow is changed for this project.

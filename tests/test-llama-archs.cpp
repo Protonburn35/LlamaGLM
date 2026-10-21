@@ -800,18 +800,39 @@ static void test_owned_stage_forward(llama_model * reference, const std::array<l
         throw std::runtime_error("stage abort callback did not interrupt computation");
     }
     llama_set_abort_callback(contexts[0].get(), nullptr, nullptr);
+    if (llama_get_embeddings(contexts[0].get()) || llama_get_embeddings_ith(contexts[0].get(), -1) ||
+            llama_get_logits(contexts[0].get()) || llama_get_logits_ith(contexts[0].get(), -1)) {
+        throw std::runtime_error("failed input stage exposed stale output buffers");
+    }
     llama_memory_clear(llama_get_memory(contexts[0].get()), true);
     common_batch reset_input(contexts[0].get());
     reset_input.add(tokens[0], 0, 0, false);
-    if (llama_process(contexts[0].get(), LLAMA_PROCESS_TYPE_DECODE, reset_input.get()) == 0) {
+    if (llama_process(contexts[0].get(), LLAMA_PROCESS_TYPE_DECODE, reset_input.get()) == 0 || llama_get_embeddings(contexts[0].get())) {
         throw std::runtime_error("failed stage context was reusable after clearing memory");
     }
     contexts[0].reset(llama_init_stage_from_model(models[0].get(), params));
     if (!contexts[0]) { throw std::runtime_error("could not recreate a stage context"); }
     common_batch recovered_input(contexts[0].get());
     recovered_input.add(tokens[0], 0, 0, false);
-    if (llama_process(contexts[0].get(), LLAMA_PROCESS_TYPE_DECODE, recovered_input.get())) {
+    if (llama_process(contexts[0].get(), LLAMA_PROCESS_TYPE_DECODE, recovered_input.get()) || !llama_get_embeddings(contexts[0].get())) {
         throw std::runtime_error("could not recover a stage context while retaining owned weights");
+    }
+    std::vector<float> interrupted_boundary(models[2]->n_embd_inp(), 0.0f);
+    common_batch interrupted_terminal(contexts[2].get());
+    const llama_pos terminal_position = position;
+    interrupted_terminal.add_embd({interrupted_boundary.data(), 1, interrupted_boundary.size()}, &terminal_position, 0, true);
+    llama_set_abort_callback(contexts[2].get(), [](void *) { return true; }, nullptr);
+    if (llama_process(contexts[2].get(), LLAMA_PROCESS_TYPE_DECODE, interrupted_terminal.get()) == 0) {
+        throw std::runtime_error("terminal stage abort callback did not interrupt computation");
+    }
+    llama_set_abort_callback(contexts[2].get(), nullptr, nullptr);
+    if (llama_get_logits(contexts[2].get()) || llama_get_logits_ith(contexts[2].get(), -1) ||
+            llama_get_embeddings(contexts[2].get()) || llama_get_embeddings_ith(contexts[2].get(), -1)) {
+        throw std::runtime_error("failed terminal stage exposed stale logits or embeddings");
+    }
+    llama_memory_clear(llama_get_memory(contexts[2].get()), true);
+    if (llama_get_logits(contexts[2].get()) || llama_get_logits_ith(contexts[2].get(), -1)) {
+        throw std::runtime_error("memory clearing re-exposed failed terminal output buffers");
     }
     LOG("Stage forward: ends %u/%u/%u, 131 tokens, chunks 1/3/4/17/31/64/11, owned FP32 KDA/FP16 MLA+index state, max boundary error %.9g, max logit error %.9g\n",
             models[0]->stage.layer_ends[0], models[0]->stage.layer_ends[1], models[0]->stage.layer_ends[2], max_boundary_error, max_logit_error);

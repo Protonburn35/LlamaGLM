@@ -1022,6 +1022,7 @@ enum llama_pooling_type llama_context::pooling_type() const {
 }
 
 float * llama_context::get_logits() {
+    if (stage_failed) { return nullptr; }
     output_reorder();
 
     return logits.data;
@@ -1057,6 +1058,7 @@ int64_t llama_context::output_resolve_row(int32_t i) const {
 }
 
 float * llama_context::get_logits_ith(int32_t i) {
+    if (stage_failed) { return nullptr; }
     output_reorder();
 
     try {
@@ -1077,16 +1079,19 @@ float * llama_context::get_logits_ith(int32_t i) {
 }
 
 float * llama_context::get_embeddings() {
+    if (stage_failed) { return nullptr; }
     output_reorder();
 
     return embd.data;
 }
 
 llama_token * llama_context::get_sampled_tokens()  const{
+    if (stage_failed) { return nullptr; }
     return sampling.sampled.data;
 }
 
 float * llama_context::get_embeddings_ith(int32_t i) {
+    if (stage_failed) { return nullptr; }
     output_reorder();
 
     try {
@@ -1108,6 +1113,7 @@ float * llama_context::get_embeddings_ith(int32_t i) {
 }
 
 float * llama_context::get_embeddings_seq(llama_seq_id seq_id) {
+    if (stage_failed) { return nullptr; }
     auto it = embd_seq.find(seq_id);
     if (it == embd_seq.end()) {
         return nullptr;
@@ -1117,12 +1123,14 @@ float * llama_context::get_embeddings_seq(llama_seq_id seq_id) {
 }
 
 float * llama_context::get_embeddings_nextn() {
+    if (stage_failed) { return nullptr; }
     output_reorder();
 
     return embd_nextn.data;
 }
 
 float * llama_context::get_embeddings_nextn_ith(int32_t i) {
+    if (stage_failed) { return nullptr; }
     output_reorder();
 
     try {
@@ -1153,6 +1161,7 @@ float * llama_context::get_embeddings_nextn_ith(int32_t i) {
 }
 
 float * llama_context::get_embeddings_layer_inp(uint32_t lid) {
+    if (stage_failed) { return nullptr; }
     output_reorder();
 
     GGML_ASSERT(lid < embd_layer_inp.size() && embd_layer_inp[lid].has_data());
@@ -1161,6 +1170,7 @@ float * llama_context::get_embeddings_layer_inp(uint32_t lid) {
 }
 
 llama_token llama_context::get_sampled_token_ith(int32_t idx) {
+    if (stage_failed) { return LLAMA_TOKEN_NULL; }
     output_reorder();
 
     if (!sampling.sampled.has_data()) {
@@ -1178,6 +1188,7 @@ llama_token llama_context::get_sampled_token_ith(int32_t idx) {
 }
 
 float * llama_context::get_sampled_probs_ith(int32_t idx) {
+    if (stage_failed) { return nullptr; }
     output_reorder();
 
     if (!sampling.probs.has_data()) {
@@ -1197,6 +1208,7 @@ float * llama_context::get_sampled_probs_ith(int32_t idx) {
 }
 
 float * llama_context::get_sampled_logits_ith(int32_t idx) {
+    if (stage_failed) { return nullptr; }
     output_reorder();
 
     if (!sampling.logits.has_data()) {
@@ -1216,6 +1228,7 @@ float * llama_context::get_sampled_logits_ith(int32_t idx) {
 }
 
 const llama_token * llama_context::get_sampled_candidates_ith(int32_t idx) {
+    if (stage_failed) { return nullptr; }
     output_reorder();
 
     try {
@@ -1234,6 +1247,7 @@ const llama_token * llama_context::get_sampled_candidates_ith(int32_t idx) {
 }
 
 size_t llama_context::get_sampled_candidates_count(int32_t idx) {
+    if (stage_failed) { return 0; }
     output_reorder();
 
     if (!sampling.candidates.has_data()) {
@@ -1253,6 +1267,7 @@ size_t llama_context::get_sampled_candidates_count(int32_t idx) {
 }
 
 size_t llama_context::get_sampled_logits_count(int32_t idx) {
+    if (stage_failed) { return 0; }
     output_reorder();
 
     if (!sampling.logits.has_data()) {
@@ -1272,6 +1287,7 @@ size_t llama_context::get_sampled_logits_count(int32_t idx) {
 }
 
 size_t llama_context::get_sampled_probs_count(int32_t idx) {
+    if (stage_failed) { return 0; }
     output_reorder();
 
     if (!sampling.probs.has_data()) {

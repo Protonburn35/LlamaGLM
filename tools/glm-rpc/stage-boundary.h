@@ -9,6 +9,11 @@ namespace glm_rpc {
 void send_boundary(tcp_socket & socket, sender & codec, header coordinates, const limits & bounds,
                    const float * values, size_t count, deadline until);
 
+// Already canonical little-endian FP32 bytes, for immutable cached replies. No float aliasing
+// or conversion: caller binds these exact unfragmented bytes to the applied output receipt.
+void send_boundary_bytes(tcp_socket & socket, sender & codec, header coordinates, const limits & bounds,
+                         bytes_view payload, deadline until);
+
 // Authenticates each fragment and checks all coordinates/order before exposing the complete input.
 // input_budget bounds the one returned float buffer; account separately for one frame and model buffers.
 // Any error discards partial input and permanently interrupts this connection. No transaction retry.

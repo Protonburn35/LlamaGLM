@@ -355,6 +355,7 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path) -> None:
                     record = records[0]
                     if not (record["rank"] == worker.rank and record["generation"] == generation and
                             record["executions"] == record["committed_retries"] == 7 and record["committed_position"] == 131 and
+                            record["network_retries"] == 1 and
                             0 < record["reply_bytes"] <= record["peak_reply_bytes"] <= 256 << 10 and
                             (0 < record["reply_page_bytes"] <= record["peak_reply_page_bytes"] <= 256 << 10 if worker.rank == 1 else
                              record["reply_page_bytes"] == record["peak_reply_page_bytes"] == 0) and
@@ -376,6 +377,7 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path) -> None:
                     raise RuntimeError("distributed owners disagree on weight coverage or complete commit certificates")
                 print(f"THREE_PROCESS_TRANSACTIONS_PASS: {label}; seven all-owner commits/retries; 131 tokens; "
                       f"byte-exact boundaries/logits; max error {maximum:.9g}; full admission NOT_VALIDATED")
+                print("CONTROL_RECONNECT_RETRY_PASS: fresh handshakes/counters; duplicate boundary/commit served from immutable replies; no extra graph calls")
             finally:
                 for worker in reversed(workers):
                     worker.close()

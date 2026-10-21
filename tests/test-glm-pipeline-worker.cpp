@@ -73,6 +73,77 @@ static void send_control(fixture_control & peer, const step_key & step, kind typ
     write_frame(peer.socket, *peer.tx, metadata, payload, shortly());
 }
 
+static void connect_controls(uint32_t rank, std::array<fixture_control, 3> & controls, tcp_socket & control_listener,
+        const secret & psk, const digest & identity, const limits & bounds, const std::array<uint16_t, 3> & ports) {
+    // Reconnect only after known global completion. Old directional codecs/counters are discarded.
+    for (auto & link : controls) { link.socket.interrupt(); link = fixture_control{}; }
+    if (rank == 0) {
+        for (uint32_t remote : {1u, 2u}) {
+            auto & link = controls[remote];
+            const auto port = ports[remote];
+            link.socket = tcp_socket::connect({"127.0.0.1", port}, shortly());
+            const auto peer = authenticate_client(link.socket, psk, {identity,0,remote,channel::control}, shortly());
+            link.bind(psk, peer, rank, bounds);
+        }
+    } else {
+        auto & link = controls[0];
+        link.socket = control_listener.accept(shortly());
+        const auto peer = authenticate_server(link.socket, psk, {identity,0,rank,channel::control}, shortly());
+        link.bind(psk, peer, rank, bounds);
+    }
+}
+
+static commit_certificate finish_transaction(uint32_t rank, const step_key & step, const owner_receipt & receipt,
+        owner_transactions & ledger, reply_cache & replies, std::array<fixture_control, 3> & controls,
+        const limits & bounds, bool drop_ack) {
+    commit_certificate decision;
+    if (rank == 0) {
+        commit_barrier barrier(step, bounds);
+        barrier.record_applied(0, receipt);
+        for (uint32_t remote : {1u, 2u}) {
+            auto & link = controls[remote];
+            const auto frame = read_frame(link.socket, *link.rx, shortly());
+            barrier.record_applied(remote, decode_applied_ack(frame.metadata,
+                {frame.payload.data(), frame.payload.size()}, step, bounds));
+        }
+        decision = barrier.decision();
+        const auto encoded = encode_commit_certificate(decision, bounds);
+        for (uint32_t remote : {1u, 2u}) {
+            send_control(controls[remote], step, kind::commit, 0, remote, {encoded.data(), encoded.size()});
+        }
+        const auto local = ledger.commit(decision);
+        require(replies.commit(decision)->receipt() == local, "A committed reply differs from actual owner state");
+        barrier.record_committed(0, make_commit_ack(local, decision, bounds));
+        const auto fingerprint = fingerprint_commit(decision, bounds);
+        for (uint32_t remote : {1u, 2u}) {
+            auto & link = controls[remote];
+            const auto frame = read_frame(link.socket, *link.rx, shortly());
+            barrier.record_committed(remote, decode_committed_ack(frame.metadata,
+                {frame.payload.data(), frame.payload.size()}, step, fingerprint, bounds));
+        }
+        const auto completion = encode_commit_completion(barrier.committed(), bounds);
+        for (uint32_t remote : {1u, 2u}) {
+            send_control(controls[remote], step, kind::commit_complete, 0, remote, {completion.data(), completion.size()});
+        }
+    } else {
+        auto & link = controls[0];
+        const auto encoded = encode_applied_receipt(receipt, bounds);
+        send_control(link, step, kind::state_ack, rank, 0, {encoded.data(), encoded.size()});
+        const auto command = read_frame(link.socket, *link.rx, shortly());
+        decision = decode_commit_decision(command.metadata, {command.payload.data(), command.payload.size()}, step, bounds);
+        const auto local = ledger.commit(decision);
+        require(replies.commit(decision)->receipt() == local, "committed reply differs from actual owner state");
+        const auto acknowledged = make_commit_ack(local, decision, bounds);
+        if (drop_ack) { throw std::runtime_error("injected lost B commit acknowledgement after local commit"); }
+        const auto ack = encode_commit_ack(acknowledged, bounds);
+        send_control(link, step, kind::commit_ack, rank, 0, {ack.data(), ack.size()});
+        const auto complete = read_frame(link.socket, *link.rx, shortly());
+        decode_commit_completion(complete.metadata, {complete.payload.data(), complete.payload.size()},
+            step, acknowledged.certificate_digest, bounds);
+    }
+    return decision;
+}
+
 static execution_identity fixture_identity(const std::string & path, bool locked) {
     require(std::filesystem::file_size(path) <= (128ull << 20), "worker accepts only the small synthetic test model");
     gguf_context_ptr metadata(gguf_init_from_file(path.c_str(), {true, nullptr}));
@@ -292,26 +363,18 @@ int main(int argc, char ** argv) {
             const auto peer = authenticate_server(incoming, psk, {identity,rank-1,rank,channel::data}, shortly());
             rx = std::make_unique<receiver>(derive_link_key(psk, peer), peer, bounds);
         }
+        std::array<uint16_t, 3> control_ports{};
         if (transactional) {
             if (rank == 0) {
-                for (uint32_t remote : {1u, 2u}) {
-                    auto & link = controls[remote];
-                    const auto port = uint16_t(integer(args.at(remote == 1 ? "--control-b" : "--control-c"), 65535));
-                    link.socket = tcp_socket::connect({"127.0.0.1", port}, shortly());
-                    const auto peer = authenticate_client(link.socket, psk, {identity,0,remote,channel::control}, shortly());
-                    link.bind(psk, peer, rank, bounds);
-                }
-            } else {
-                auto & link = controls[0];
-                link.socket = control_listener.accept(shortly());
-                const auto peer = authenticate_server(link.socket, psk, {identity,0,rank,channel::control}, shortly());
-                link.bind(psk, peer, rank, bounds);
+                control_ports[1] = uint16_t(integer(args.at("--control-b"), 65535));
+                control_ports[2] = uint16_t(integer(args.at("--control-c"), 65535));
             }
+            connect_controls(rank, controls, control_listener, psk, identity, bounds, control_ports);
         }
         std::printf("GLM_PIPELINE_OWNED %u %u %u %llu\n", rank, rank ? ends[rank-1] : 0, ends[rank],
                 static_cast<unsigned long long>(llama_model_size(model.get())));
         std::fflush(stdout);
-        erase_secret(psk);
+        if (!transactional) { erase_secret(psk); }
         std::optional<owner_transactions> ledger;
         std::optional<reply_cache> replies;
         const epoch_stamp stamp{identity,session,generation,generation};
@@ -321,7 +384,7 @@ int main(int argc, char ** argv) {
                 preloaded ? reply_memory::locked : reply_memory::pageable});
         }
         json commits = json::array();
-        size_t executions = 0, committed_retries = 0;
+        size_t executions = 0, committed_retries = 0, network_retries = 0;
         size_t position = 0;
         try {
         for (size_t chunk = 0; chunk < expected_chunks.size(); ++chunk) {
@@ -368,51 +431,7 @@ int main(int argc, char ** argv) {
                 send_boundary(outgoing, *tx, metadata, bounds, values, count * 512, shortly());
             }
             if (transactional) {
-                commit_certificate decision;
-                if (rank == 0) {
-                    commit_barrier barrier(step, bounds);
-                    barrier.record_applied(0, *receipt);
-                    for (uint32_t remote : {1u, 2u}) {
-                        auto & link = controls[remote];
-                        const auto frame = read_frame(link.socket, *link.rx, shortly());
-                        barrier.record_applied(remote, decode_applied_ack(frame.metadata,
-                            {frame.payload.data(), frame.payload.size()}, step, bounds));
-                    }
-                    decision = barrier.decision();
-                    const auto encoded = encode_commit_certificate(decision, bounds);
-                    for (uint32_t remote : {1u, 2u}) {
-                        send_control(controls[remote], step, kind::commit, 0, remote, {encoded.data(), encoded.size()});
-                    }
-                    const auto local = ledger->commit(decision);
-                    require(replies->commit(decision)->receipt() == local, "A committed reply differs from actual owner state");
-                    barrier.record_committed(0, make_commit_ack(local, decision, bounds));
-                    const auto fingerprint = fingerprint_commit(decision, bounds);
-                    for (uint32_t remote : {1u, 2u}) {
-                        auto & link = controls[remote];
-                        const auto frame = read_frame(link.socket, *link.rx, shortly());
-                        barrier.record_committed(remote, decode_committed_ack(frame.metadata,
-                            {frame.payload.data(), frame.payload.size()}, step, fingerprint, bounds));
-                    }
-                    const auto completion = encode_commit_completion(barrier.committed(), bounds);
-                    for (uint32_t remote : {1u, 2u}) {
-                        send_control(controls[remote], step, kind::commit_complete, 0, remote, {completion.data(), completion.size()});
-                    }
-                } else {
-                    auto & link = controls[0];
-                    const auto encoded = encode_applied_receipt(*receipt, bounds);
-                    send_control(link, step, kind::state_ack, rank, 0, {encoded.data(), encoded.size()});
-                    const auto command = read_frame(link.socket, *link.rx, shortly());
-                    decision = decode_commit_decision(command.metadata, {command.payload.data(), command.payload.size()}, step, bounds);
-                    const auto local = ledger->commit(decision);
-                    require(replies->commit(decision)->receipt() == local, "committed reply differs from actual owner state");
-                    const auto acknowledged = make_commit_ack(local, decision, bounds);
-                    if (drop_ack && chunk == 0) { throw std::runtime_error("injected lost B commit acknowledgement after local commit"); }
-                    const auto ack = encode_commit_ack(acknowledged, bounds);
-                    send_control(link, step, kind::commit_ack, rank, 0, {ack.data(), ack.size()});
-                    const auto complete = read_frame(link.socket, *link.rx, shortly());
-                    decode_commit_completion(complete.metadata, {complete.payload.data(), complete.payload.size()},
-                        step, acknowledged.certificate_digest, bounds);
-                }
+                const auto decision = finish_transaction(rank, step, *receipt, *ledger, *replies, controls, bounds, drop_ack && chunk == 0);
                 const auto committed_hash = fingerprint_commit(decision, bounds);
                 std::string encoded_hash;
                 for (const auto byte : committed_hash) {
@@ -425,6 +444,31 @@ int main(int argc, char ** argv) {
                         fingerprint_bytes(retained->payload().data, retained->payload().size) == receipt->output_digest,
                         "committed retry lost immutable output bytes");
                 ++committed_retries;
+                if (chunk == 0) {
+                    // All owners have a known complete first commit. Fresh control handshakes
+                    // reset connection counters; semantic dedup and cached bytes must survive.
+                    connect_controls(rank, controls, control_listener, psk, identity, bounds, control_ports);
+                    auto duplicate = metadata;
+                    auto repeated_input = step.request_digest;
+                    if (rank) {
+                        duplicate.sender = rank-1; duplicate.receiver = rank;
+                        input = receive_boundary(incoming, *rx, duplicate, bounds, uint64_t(bounds.rows)*512*sizeof(float), shortly());
+                        repeated_input = fingerprint_bytes(input.data(), input.size()*sizeof(float));
+                    }
+                    require(ledger->prepare(step, repeated_input) == step_disposition::committed,
+                            "reconnected committed request attempted graph execution");
+                    const auto replay = replies->committed_reply(step);
+                    require(replay == retained && fingerprint_bytes(replay->payload().data,replay->payload().size) == receipt->output_digest,
+                            "reconnected retry lost the exact immutable reply");
+                    if (rank < 2) {
+                        duplicate.sender = rank; duplicate.receiver = rank+1;
+                        send_boundary_bytes(outgoing, *tx, duplicate, bounds, replay->payload(), shortly());
+                    }
+                    const auto repeated = finish_transaction(rank, step, replay->receipt(), *ledger, *replies, controls, bounds, false);
+                    require(fingerprint_commit(repeated,bounds) == committed_hash && ledger->committed_position() == position+count,
+                            "reconnected retry changed its complete certificate or committed position");
+                    ++network_retries;
+                }
             }
             const auto output_bytes = retained ? retained->payload() : bytes_view{reinterpret_cast<const uint8_t *>(values),bytes};
             output.write(reinterpret_cast<const char *>(output_bytes.data), output_bytes.size);
@@ -443,6 +487,7 @@ int main(int argc, char ** argv) {
             }
             throw;
         }
+        erase_secret(psk);
         output.close();
         require(bool(output), "cannot seal fixture worker output");
         report_storage("complete");
@@ -453,6 +498,7 @@ int main(int argc, char ** argv) {
                     retained.peak_page_bytes <= (256u<<10), "worker reply capacity or lifetime accounting failed");
             const json evidence{{"rank",rank}, {"generation",generation}, {"executions",executions},
                 {"committed_retries",committed_retries}, {"committed_position",ledger->committed_position()},
+                {"network_retries",network_retries},
                 {"certificates",commits}, {"reply_bytes",retained.payload_bytes}, {"peak_reply_bytes",retained.peak_payload_bytes},
                 {"reply_page_bytes",retained.page_bytes}, {"peak_reply_page_bytes",retained.peak_page_bytes},
                 {"full_residency_validated",false}};

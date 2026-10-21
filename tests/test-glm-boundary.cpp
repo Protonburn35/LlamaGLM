@@ -41,7 +41,7 @@ static std::vector<float> pattern(size_t count) {
     return values;
 }
 
-static void bit_exact(uint32_t rows, uint32_t hidden, uint32_t frame_bytes) {
+static void bit_exact(uint32_t rows, uint32_t hidden, uint32_t frame_bytes, bool canonical = false) {
     fixture f;
     f.bounds.hidden = f.expected.hidden = hidden; f.bounds.rows = f.expected.rows = rows;
     f.bounds.frame_bytes = frame_bytes;
@@ -60,7 +60,16 @@ static void bit_exact(uint32_t rows, uint32_t hidden, uint32_t frame_bytes) {
     auto socket = tcp_socket::connect(listener.local_endpoint(), shortly());
     const auto peer = authenticate_client(socket, f.psk, f.identity, shortly());
     sender tx(derive_link_key(f.psk, peer), peer, f.bounds);
-    send_boundary(socket, tx, f.expected, f.bounds, values.data(), values.size(), shortly());
+    if (canonical) {
+        std::vector<uint8_t> encoded(values.size()*sizeof(float));
+        for (size_t i = 0; i < values.size(); ++i) {
+            uint32_t bits; std::memcpy(&bits,values.data()+i,sizeof(bits));
+            for (size_t byte = 0; byte < 4; ++byte) { encoded[i*4+byte] = uint8_t(bits >> (byte*8)); }
+        }
+        send_boundary_bytes(socket, tx, f.expected, f.bounds, {encoded.data(),encoded.size()}, shortly());
+    } else {
+        send_boundary(socket, tx, f.expected, f.bounds, values.data(), values.size(), shortly());
+    }
     server.get();
 }
 
@@ -185,11 +194,31 @@ static void chunk_deadline() {
     server.get();
 }
 
+static void canonical_size_refusal() {
+    fixture f;
+    for (size_t size : {size_t(0),size_t(f.expected.total_bytes-1),size_t(f.expected.total_bytes+1)}) {
+        auto listener = tcp_socket::listen({"127.0.0.1",0});
+        auto socket = tcp_socket::connect(listener.local_endpoint(),shortly());
+        auto peer_socket = listener.accept(shortly());
+        binding peer; peer.server_nonce.fill(1); peer.client_nonce.fill(2); peer.identity.fill(3);
+        sender tx(derive_link_key(f.psk,peer),peer,f.bounds);
+        uint8_t byte = 0;
+        try { send_boundary_bytes(socket,tx,f.expected,f.bounds,{&byte,size},shortly()); }
+        catch (const std::invalid_argument &) {
+            try { socket.write_all({&byte,1},shortly()); }
+            catch (const io_error &) { continue; }
+            throw std::runtime_error("invalid canonical payload left connection reusable");
+        }
+        throw std::runtime_error("incorrect canonical boundary size was accepted");
+    }
+}
+
 int main() {
     try {
         bit_exact(2048, 4096, max_frame_bytes); bit_exact(33, 128, 64u << 10);
+        bit_exact(33,128,64u<<10,true); canonical_size_refusal();
         completion_barrier(); coordinate_refusal(); broken_input(false); broken_input(true); reserved_budget(); chunk_deadline();
-        std::puts("GLM boundary: eight suites passed (128 MiB, tails, complete barrier, coordinates, truncation, MAC, budget, deadline)");
+        std::puts("GLM boundary: ten suites passed (128 MiB, tails, canonical cached bytes/size refusal, complete barrier, coordinates, truncation, MAC, budget, deadline)");
         return 0;
     } catch (const std::exception & error) {
         std::fprintf(stderr, "GLM boundary test failed: %s\n", error.what());

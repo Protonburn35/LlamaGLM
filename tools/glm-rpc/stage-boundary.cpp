@@ -82,6 +82,24 @@ void send_boundary(tcp_socket & socket, sender & codec, header coordinates, cons
     } catch (...) { socket.interrupt(); throw; }
 }
 
+void send_boundary_bytes(tcp_socket & socket, sender & codec, header coordinates, const limits & bounds,
+                         bytes_view payload, deadline until) {
+    try {
+        check_deadline(until);
+        auto metadata = prepare(coordinates, bounds);
+        if (!payload.data || payload.size != metadata.total_bytes) {
+            throw std::invalid_argument("canonical boundary bytes differ from the execution plan");
+        }
+        for (uint32_t i = 0; i < metadata.fragments; ++i) {
+            const size_t offset = size_t(i) * bounds.frame_bytes;
+            const size_t size = size_t(std::min<uint64_t>(bounds.frame_bytes, metadata.total_bytes - offset));
+            metadata.fragment = i;
+            write_frame(socket, codec, metadata, {payload.data + offset,size}, until);
+            check_deadline(until);
+        }
+    } catch (...) { socket.interrupt(); throw; }
+}
+
 std::vector<float> receive_boundary(tcp_socket & socket, receiver & codec, header expected, const limits & bounds,
                                     uint64_t input_budget, deadline until) {
     try {

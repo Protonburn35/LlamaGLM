@@ -12,6 +12,7 @@
 #include "stage-commit-barrier.h"
 #include "stage-replies.h"
 #include "stage-sampling.h"
+#include "stage-sampling-codec.h"
 #include "glm-fixture-lock-quota.h"
 
 #include <nlohmann/json.hpp>
@@ -135,7 +136,8 @@ static void send_control(fixture_control & peer, const step_key & step, kind typ
 }
 
 static void connect_controls(uint32_t rank, std::array<fixture_control, 3> & controls, tcp_socket & control_listener,
-        const secret & psk, const digest & identity, const limits & bounds, const std::array<uint16_t, 3> & ports) {
+        const secret & psk, const digest & identity, const limits & bounds, const std::array<uint16_t, 3> & ports,
+        const sampling_config & sampling, const epoch_stamp & stamp) {
     // Reconnect only after known global completion. Old directional codecs/counters are discarded.
     for (auto & link : controls) {
         const auto totals = sum_io(link.retired_io,link.socket.io_stats());
@@ -154,6 +156,22 @@ static void connect_controls(uint32_t rank, std::array<fixture_control, 3> & con
         link.socket = control_listener.accept(shortly());
         const auto peer = authenticate_server(link.socket, psk, {identity,0,rank,channel::control}, shortly());
         link.bind(psk, peer, rank, bounds);
+    }
+    const step_key setup_step{stamp,0,0,0,0,{}};
+    if (!rank) {
+        const auto proposal = encode_sampling_setup(sampling,stamp,bounds);
+        for (uint32_t remote : {1u,2u}) {
+            send_control(controls[remote],setup_step,kind::sampling_setup,0,remote,{proposal.data(),proposal.size()});
+        }
+        for (uint32_t remote : {1u,2u}) {
+            auto & link = controls[remote]; const auto frame = read_frame(link.socket,*link.rx,shortly());
+            decode_sampling_setup_ack(frame.metadata,{frame.payload.data(),frame.payload.size()},remote,sampling,stamp,bounds);
+        }
+    } else {
+        auto & link = controls[0]; const auto frame = read_frame(link.socket,*link.rx,shortly());
+        decode_sampling_setup(frame.metadata,{frame.payload.data(),frame.payload.size()},rank,sampling,stamp,bounds);
+        const auto acknowledged = encode_sampling_setup_ack(sampling,stamp,bounds);
+        send_control(link,setup_step,kind::sampling_setup_ack,rank,0,{acknowledged.data(),acknowledged.size()});
     }
 }
 
@@ -182,7 +200,7 @@ static terminal_outcome greedy_outcome(const sampling_result & sampled, const co
     return result;
 }
 
-static json terminal_evidence(const terminal_outcome & result) {
+static json terminal_evidence(const sampling_result & result) {
     const auto bits = [](float value) { uint32_t encoded; std::memcpy(&encoded,&value,sizeof(encoded)); return encoded; };
     json top = json::array();
     for (size_t i = 0; i < result.count; ++i) { top.push_back({result.top[i].token,bits(result.top[i].logit)}); }
@@ -191,8 +209,8 @@ static json terminal_evidence(const terminal_outcome & result) {
 
 static commit_certificate finish_transaction(uint32_t rank, const step_key & step, const owner_receipt & receipt,
         owner_transactions & ledger, reply_cache & replies, std::array<fixture_control, 3> & controls,
-        const limits & bounds, bool drop_ack, std::optional<terminal_outcome> & terminal, size_t & terminal_transfers,
-        sampling_transactions * sampler, const reply_lease & retained) {
+        const limits & bounds, bool drop_ack, std::optional<sampling_result> & terminal, size_t & terminal_transfers,
+        sampling_transactions * sampler, const reply_lease & retained, const sampling_config & sampling) {
     commit_certificate decision;
     if (rank == 0) {
         commit_barrier barrier(step, bounds);
@@ -224,7 +242,15 @@ static commit_certificate finish_transaction(uint32_t rank, const step_key & ste
         }
         auto & link = controls[2];
         const auto result = read_frame(link.socket,*link.rx,shortly());
-        terminal = decode_terminal_outcome(result.metadata,{result.payload.data(),result.payload.size()},step,fingerprint,128,8,bounds);
+        if (sampling.mode == sampling_mode::greedy) {
+            const auto decoded = decode_terminal_outcome(result.metadata,{result.payload.data(),result.payload.size()},step,fingerprint,128,8,bounds);
+            sampling_result sampled; sampled.receipt = decision.owners[2]; sampled.configuration = fingerprint_sampling(sampling);
+            sampled.certificate_digest = fingerprint; sampled.ordinal = step.transaction; sampled.selected_token = decoded.selected_token;
+            sampled.selected_logit = decoded.selected_logit; sampled.count = decoded.count; sampled.row = decoded.row; sampled.top = decoded.top;
+            terminal = sampled;
+        } else {
+            terminal = decode_sampling_result(result.metadata,{result.payload.data(),result.payload.size()},sampling,decision,step.transaction,bounds);
+        }
         ++terminal_transfers;
     } else {
         auto & link = controls[0];
@@ -246,9 +272,14 @@ static commit_certificate finish_transaction(uint32_t rank, const step_key & ste
         decode_commit_completion(complete.metadata, {complete.payload.data(), complete.payload.size()},
             step, acknowledged.certificate_digest, bounds);
         if (rank == 2) {
-            terminal = greedy_outcome(sampler->complete_after_global(decision),decision,bounds);
-            const auto payload = encode_terminal_outcome(*terminal,bounds);
-            send_control(link,step,kind::terminal_result,2,0,{payload.data(),payload.size()});
+            terminal = sampler->complete_after_global(decision);
+            if (sampling.mode == sampling_mode::greedy) {
+                const auto payload = encode_terminal_outcome(greedy_outcome(*terminal,decision,bounds),bounds);
+                send_control(link,step,kind::terminal_result,2,0,{payload.data(),payload.size()});
+            } else {
+                const auto payload = encode_sampling_result(*terminal,sampling,decision,bounds);
+                send_control(link,step,kind::sampled_result,2,0,{payload.data(),payload.size()});
+            }
             ++terminal_transfers;
         }
     }
@@ -338,12 +369,23 @@ int main(int argc, char ** argv) {
         require(std::filesystem::file_size(request_path) <= 16384, "fixture requests exceed limit");
         std::ifstream requests_file(request_path);
         const auto requests = json::parse(requests_file);
-        const bool greedy = requests.contains("generation_mode");
-        require(!greedy || (transactional && requests.at("generation_mode") == "greedy" && requests.at("prompt_rows") == 17),
-                "greedy feedback requires the transactional prompt profile");
-        std::vector<uint32_t> expected_chunks = greedy ? std::vector<uint32_t>(17,1) : std::vector<uint32_t>{1,3,4,17,31,64,11};
-        if (greedy) { expected_chunks[0] = 17; }
-        const size_t total_rows = greedy ? 33 : 131;
+        const bool feedback = requests.contains("generation_mode");
+        const bool sampled = feedback && requests.at("generation_mode") == "sampled";
+        require(requests.contains("sampling") == sampled, "sampling configuration requires the sampled feedback profile");
+        require(!feedback || (transactional && (requests.at("generation_mode") == "greedy" || sampled) && requests.at("prompt_rows") == 17),
+                "feedback requires the transactional prompt profile");
+        sampling_config sampling{sampling_mode::greedy,128,0,1,8};
+        if (sampled) {
+            const auto & configured = requests.at("sampling");
+            require(configured.is_object() && configured.size() == 4 && configured.at("mode") == 2 &&
+                    configured.at("seed").is_number_unsigned() && configured.at("seed").get<uint64_t>() < UINT32_MAX &&
+                    configured.at("temperature").is_number() && configured.at("candidates") == 8, "invalid fixture sampling configuration");
+            sampling = {sampling_mode::temperature_distribution,128,configured.at("seed").get<uint32_t>(),configured.at("temperature").get<float>(),8};
+        }
+        const auto sampling_identity = fingerprint_sampling(sampling);
+        std::vector<uint32_t> expected_chunks = feedback ? std::vector<uint32_t>(17,1) : std::vector<uint32_t>{1,3,4,17,31,64,11};
+        if (feedback) { expected_chunks[0] = 17; }
+        const size_t total_rows = feedback ? 33 : 131;
         require(requests.at("version") == 1 && requests.at("context") == 256 && requests.at("hidden") == 128 &&
                 requests.at("vocab") == 128 && requests.at("chunks") == expected_chunks &&
                 requests.at("layer_ends") == json(agreed.layer_ends) &&
@@ -351,7 +393,7 @@ int main(int argc, char ** argv) {
         std::vector<int32_t> tokens;
         if (!transactional || rank == 0) {
             const auto & token_values = requests.at("tokens");
-            require(token_values.is_array() && token_values.size() == (greedy ? 17 : 131), "invalid fixture prompt/token count");
+            require(token_values.is_array() && token_values.size() == (feedback ? 17 : 131), "invalid fixture prompt/token count");
             for (const auto & token : token_values) {
                 require(token.is_number_integer(), "fixture tokens must be integers");
                 if (token.is_number_unsigned()) { require(token.get<uint64_t>() < 128, "invalid fixture token ID"); }
@@ -502,16 +544,16 @@ int main(int argc, char ** argv) {
                 const auto peer = authenticate_server(incoming, psk, {identity,rank-1,rank,channel::data}, shortly());
                 rx = std::make_unique<receiver>(derive_link_key(psk, peer), peer, bounds);
             }
-            if (transactional) { connect_controls(rank, controls, control_listener, psk, identity, bounds, control_ports); }
+            const epoch_stamp stamp{identity,session,generation,generation};
+            if (transactional) { connect_controls(rank, controls, control_listener, psk, identity, bounds, control_ports,sampling,stamp); }
             std::printf("GLM_PIPELINE_OWNED %u %u %u %llu\n", rank, rank ? ends[rank-1] : 0, ends[rank],
                     static_cast<unsigned long long>(llama_model_size(model.get())));
             std::fflush(stdout);
             if (!transactional) { erase_secret(psk); }
             std::optional<owner_transactions> ledger;
             std::optional<reply_cache> replies;
-            const epoch_stamp stamp{identity,session,generation,generation};
             std::optional<sampling_transactions> sampler;
-            if (transactional && rank == 2) { sampler.emplace(sampling_config{sampling_mode::greedy,128,0,1,8},stamp,bounds); }
+            if (transactional && rank == 2) { sampler.emplace(sampling,stamp,bounds); }
             if (transactional) {
                 ledger.emplace(rank, identity, bounds); ledger->fresh_context(stamp);
                 replies.emplace(rank, stamp, bounds, reply_limits{256u<<10,preloaded ? 256u<<10 : 0,3,
@@ -521,7 +563,7 @@ int main(int argc, char ** argv) {
             json terminal_results = json::array();
             json feedback_tokens = json::array();
             auto actual_tokens = tokens;
-            std::optional<terminal_outcome> terminal;
+            std::optional<sampling_result> terminal;
             size_t terminal_transfers = 0;
             size_t executions = 0, committed_retries = 0, network_retries = 0;
             size_t replayed_rows = 0, new_output_rows = 0;
@@ -536,7 +578,7 @@ int main(int argc, char ** argv) {
                 metadata.session[0] = 1; metadata.position = position;
                 metadata.rows = count; metadata.hidden = 128; metadata.streams = 4;
                 metadata.element = dtype::f32;
-                if (greedy && rank == 0 && chunk) {
+                if (feedback && rank == 0 && chunk) {
                     require(count == 1 && terminal && actual_tokens.size() == position,
                             "next decode requires the prior globally committed C result");
                     actual_tokens.push_back(llama_token(terminal->selected_token));
@@ -544,6 +586,11 @@ int main(int argc, char ** argv) {
                 }
                 step_key step{stamp,chunk+1,chunk+1,position,count,
                     transactional && rank ? digest{} : fingerprint_bytes(actual_tokens.data()+position,count*sizeof(int32_t))};
+                if (transactional && rank == 0) {
+                    constexpr uint8_t request_domain[] = "GLM fixture sampled request v1";
+                    step.request_digest = sha256({{request_domain,sizeof(request_domain)-1},{sampling_identity.data(),sampling_identity.size()},
+                        {reinterpret_cast<const uint8_t *>(actual_tokens.data()+position),count*sizeof(int32_t)}});
+                }
                 if (transactional) {
                     step = agree_begin(rank,step,controls,bounds);
                     metadata.session = session; metadata.epoch = metadata.generation = generation; metadata.chunk = step.chunk;
@@ -583,7 +630,7 @@ int main(int argc, char ** argv) {
                 }
                 if (transactional) {
                     const auto decision = finish_transaction(rank, step, *receipt, *ledger, *replies, controls, bounds,
-                        drop_ack && chunk == plan.drop_chunk,terminal,terminal_transfers,sampler ? &*sampler : nullptr,retained);
+                        drop_ack && chunk == plan.drop_chunk,terminal,terminal_transfers,sampler ? &*sampler : nullptr,retained,sampling);
                     if (rank != 1) { require(bool(terminal), "missing committed terminal result"); terminal_results.push_back(terminal_evidence(*terminal)); }
                     const auto committed_hash = fingerprint_commit(decision, bounds);
                     std::string encoded_hash;
@@ -600,7 +647,7 @@ int main(int argc, char ** argv) {
                     if (chunk == 0) {
                         // All owners have a known complete first commit. Fresh control handshakes
                         // reset connection counters; semantic dedup and cached bytes must survive.
-                        connect_controls(rank, controls, control_listener, psk, identity, bounds, control_ports);
+                        connect_controls(rank, controls, control_listener, psk, identity, bounds, control_ports,sampling,stamp);
                         agree_begin(rank,step,controls,bounds,true);
                         auto duplicate = metadata;
                         auto repeated_input = step.request_digest;
@@ -620,8 +667,8 @@ int main(int argc, char ** argv) {
                         }
                         const auto original_terminal = terminal;
                         const auto repeated = finish_transaction(rank, step, replay->receipt(), *ledger, *replies, controls, bounds,
-                            false,terminal,terminal_transfers,sampler ? &*sampler : nullptr,replay);
-                        if (rank != 1) { require(encode_terminal_outcome(*terminal,bounds) == encode_terminal_outcome(*original_terminal,bounds),
+                            false,terminal,terminal_transfers,sampler ? &*sampler : nullptr,replay,sampling);
+                        if (rank != 1) { require(encode_sampling_result(*terminal,sampling,repeated,bounds) == encode_sampling_result(*original_terminal,sampling,decision,bounds),
                             "committed terminal retry changed its sampled outcome"); }
                         require(fingerprint_commit(repeated,bounds) == committed_hash && ledger->committed_position() == position+count,
                                 "reconnected retry changed its complete certificate or committed position");
@@ -672,7 +719,7 @@ int main(int argc, char ** argv) {
                 const json evidence{{"rank",rank}, {"generation",generation}, {"executions",executions}, {"model_loads",model_loads}, {"contexts_created",contexts_created},
                     {"committed_retries",committed_retries}, {"committed_position",ledger->committed_position()},
                     {"network_retries",network_retries},
-                    {"terminal_results",terminal_results}, {"terminal_payload_bytes",terminal_transfers*terminal_wire_bytes},
+                    {"terminal_results",terminal_results}, {"terminal_payload_bytes",terminal_transfers*(sampled ? sampled_wire_bytes : terminal_wire_bytes)},
                     {"feedback_tokens",feedback_tokens},
                     {"sampling_committed_draws",sampler ? sampler->committed_draws() : 0},
                     {"replayed_rows",replayed_rows}, {"new_output_rows",new_output_rows}, {"published_rows",published_rows},

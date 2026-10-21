@@ -48,6 +48,7 @@ void validate(const header & value, const binding & peer, const limits & bounds)
         case kind::reset: case kind::state_ack: case kind::commit: case kind::abort:
         case kind::cancel: case kind::cancel_ack: case kind::heartbeat: case kind::error:
         case kind::commit_ack: case kind::commit_complete: case kind::terminal_result:
+        case kind::sampled_result: case kind::sampling_setup: case kind::sampling_setup_ack:
             if (peer.link != channel::control || value.element != dtype::none || value.rows || value.hidden || value.streams ||
                     value.fragment != 0 || value.fragments != 1 || value.payload_bytes > max_control_bytes ||
                     value.total_bytes != value.payload_bytes) {

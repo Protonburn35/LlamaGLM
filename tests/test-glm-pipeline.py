@@ -211,7 +211,7 @@ def check_storage(worker: Worker, streamed: bool, logical_bytes: int, locked: bo
 
 
 def check_io(workers: list[Worker], transactional: bool = False, generation: int = 1,
-             chunks: list[int] | None = None) -> None:
+             chunks: list[int] | None = None, sampled: bool = False) -> None:
     # Exact byte ledger includes fixed handshakes and every frame; syscall counts/times
     # remain measured OS-dependent values. No TCP/IP overhead or GPU throughput is implied.
     sizes = [(rows*512*4) for rows in (chunks or [1,3,4,17,31,64,11])]
@@ -219,9 +219,9 @@ def check_io(workers: list[Worker], transactional: bool = False, generation: int
         sizes += sizes[:1]
     forwarded = sum(size + ((size+65535)//65536)*160 for size in sizes) + 160
     rounds = len(sizes)
-    decisions = 320 + rounds*(304+544+336)
-    acknowledgements = 640 + rounds*(384+416)
-    terminal = acknowledgements + rounds*(272+160)
+    decisions = 320 + 2*(112+160) + rounds*(304+544+336)
+    acknowledgements = 640 + 2*(112+160) + rounds*(384+416)
+    terminal = acknowledgements + rounds*((320 if sampled else 272)+160)
     controls = {0: [(0,0),(acknowledgements,decisions),(terminal,decisions)],
                 1: [(decisions,acknowledgements),(0,0),(0,0)], 2: [(decisions,terminal),(0,0),(0,0)]}
     for worker in workers:
@@ -366,13 +366,15 @@ def run(oracle: pathlib.Path, executable: pathlib.Path, *, streamed: bool = Fals
                 worker.close()
 
 
-def run_transactions(oracle: pathlib.Path, executable: pathlib.Path, *, greedy: bool = False) -> None:
+def run_transactions(oracle: pathlib.Path, executable: pathlib.Path, *, greedy: bool = False, sampled: bool = False) -> None:
     """Exercise real graph commits, lost B ACK and process-restart replay with fresh keys."""
     with tempfile.TemporaryDirectory(prefix="glm transaction fixture ") as directory:
         root = pathlib.Path(directory)
         data = root / "independent oracle"
         command = [str(oracle), "--glm-pipeline-fixture", str(data), "--glm-pipeline-locked", "--seed", "53"]
-        if greedy:
+        if sampled:
+            command += ["--glm-pipeline-sampled"]
+        elif greedy:
             command += ["--glm-pipeline-greedy"]
         generated = subprocess.run(command,
                                    capture_output=True, text=True, timeout=60)
@@ -382,10 +384,11 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path, *, greedy: 
         token_count = sum(requests["chunks"])
         steps = len(requests["chunks"])
         prompt_requests = None
-        if greedy:
+        feedback = greedy or sampled
+        if feedback:
             if (requests["generation_mode"], requests["prompt_rows"], requests["chunks"], len(requests["tokens"])) != (
-                    "greedy", 17, [17]+[1]*16, 33):
-                raise RuntimeError("independent greedy oracle changed the bounded prompt/decode profile")
+                    "sampled" if sampled else "greedy", 17, [17]+[1]*16, 33):
+                raise RuntimeError("independent feedback oracle changed the bounded prompt/decode profile")
             prompt_plan = dict(requests)
             prompt_plan["tokens"] = requests["tokens"][:17]
             prompt_requests = root / "A-prompt-only.json"
@@ -394,6 +397,9 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path, *, greedy: 
         del worker_plan["tokens"]
         opaque_requests = root / "worker-coordinates-only.json"
         opaque_requests.write_text(json.dumps(worker_plan))
+        selected = json.loads((data / "oracle-selected.json").read_text()) if sampled else None
+        if sampled and (len(selected) != steps or selected[:-1] != requests["tokens"][17:]):
+            raise RuntimeError("independent sampled oracle did not feed its actual selections into decode")
 
         def terminal_oracle() -> list[dict]:
             logits = (data / "oracle-2.f32le").read_bytes()
@@ -404,15 +410,25 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path, *, greedy: 
                 row = logits[(position-1)*128*4:position*128*4]
                 scores = struct.unpack("<128f",row); bits = struct.unpack("<128I",row)
                 order = sorted(range(128),key=lambda token:(-scores[token],token))
-                output.append({"token":order[0],"logit_bits":bits[order[0]],"row":rows-1,
+                token = selected[len(output)] if sampled else order[0]
+                output.append({"token":token,"logit_bits":bits[token],"row":rows-1,
                                "top":[[token,bits[token]] for token in order[:8]]})
             return output
-        def attempt(label: str, generation: int, drop_ack: bool, recover_once: bool = False, drop_chunk: int = 0) -> None:
+        if sampled and not any(result["token"] not in [entry[0] for entry in result["top"]] for result in terminal_oracle()):
+            raise RuntimeError("actual model fixture did not qualify sampling outside diagnostic top eight")
+        def attempt(label: str, generation: int, drop_ack: bool, recover_once: bool = False, drop_chunk: int = 0,
+                    mismatch: bool = False) -> None:
             # New credential and session for each process group; never resume old connections.
             key_file = root / f"{label}-key.bin"
             key_file.touch(mode=0o600, exist_ok=False)
             key_file.write_bytes(secrets.token_bytes(32))
             session = secrets.token_hex(16)
+            middle_requests = opaque_requests
+            if mismatch:
+                changed = json.loads(opaque_requests.read_text())
+                changed["sampling"]["seed"] += 1
+                middle_requests = root / "B-other-sampling-policy.json"
+                middle_requests.write_text(json.dumps(changed))
             workers: list[Worker] = []
             try:
                 c = Worker(executable, data, key_file, root / f"{label}-C.f32le", 2,
@@ -421,7 +437,7 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path, *, greedy: 
                 c_port = c.listen_port()
                 b = Worker(executable, data, key_file, root / f"{label}-B.f32le", 1, c_port,
                            locked=True, session=session, generation=generation, drop_ack=drop_ack,
-                           recover_once=recover_once, drop_chunk=drop_chunk, requests_override=opaque_requests)
+                           recover_once=recover_once, drop_chunk=drop_chunk, requests_override=middle_requests)
                 workers.append(b)
                 b_port = b.listen_port()
                 if not b.control_port or not c.control_port:
@@ -448,7 +464,15 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path, *, greedy: 
                     b_port = b.listen_port()
                     a.recover(fresh_session, b_port, (b.control_port, c.control_port))
                 for worker in reversed(workers):
-                    worker.finish(not drop_ack or recover_once)
+                    worker.finish(not mismatch and (not drop_ack or recover_once))
+                if mismatch:
+                    if any(worker.output.stat().st_size or any(line.startswith(("GLM_PIPELINE_DONE ","GLM_PIPELINE_TRANSACTIONS "))
+                           for line in worker.lines) for worker in workers):
+                        raise RuntimeError("sampling configuration mismatch reached committed model output")
+                    if "sampling setup differs from exact local configuration" not in b.log_path.read_text(errors="replace"):
+                        raise RuntimeError("sampling mismatch failed for an unrelated reason")
+                    print("SAMPLING_CONFIGURATION_REFUSAL_PASS: different B seed refused authenticated setup before BEGIN/model output")
+                    return
                 if drop_ack and not recover_once:
                     for worker in workers:
                         if worker.output.stat().st_size or f"GLM_PIPELINE_INVALIDATED {worker.rank}" not in worker.lines:
@@ -459,7 +483,7 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path, *, greedy: 
                         raise RuntimeError("lost-ACK test failed before the intended partial commit")
                     print("LOST_COMMIT_ACK_REFUSAL_PASS: B committed then dropped ACK; A/B/C invalidated; zero output")
                     return
-                check_io(workers,True,2 if recover_once else generation,requests["chunks"])
+                check_io(workers,True,2 if recover_once else generation,requests["chunks"],sampled)
                 certificates: list[list[str]] = []
                 total_owned = 0
                 maximum = 0.0
@@ -483,9 +507,9 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path, *, greedy: 
                             record["full_residency_validated"] is False and len(record["certificates"]) == steps and
                             len(set(record["certificates"])) == steps):
                         raise RuntimeError("worker transaction cursor/retry/certificate evidence differs")
-                    if record["terminal_results"] != ([] if worker.rank == 1 else terminal_oracle()) or record["terminal_payload_bytes"] != (0 if worker.rank == 1 else (steps+1)*272):
-                        raise RuntimeError("compact terminal greedy candidates differ from independent full-logit oracle or payload budget")
-                    if record["feedback_tokens"] != (requests["tokens"][17:] if greedy and worker.rank == 0 else []):
+                    if record["terminal_results"] != ([] if worker.rank == 1 else terminal_oracle()) or record["terminal_payload_bytes"] != (0 if worker.rank == 1 else (steps+1)*(320 if sampled else 272)):
+                        raise RuntimeError("compact terminal selections/candidates differ from independent full-logit oracle or payload budget")
+                    if record["feedback_tokens"] != (requests["tokens"][17:] if feedback and worker.rank == 0 else []):
                         raise RuntimeError("actual C-to-A feedback tokens differ from independent monolithic generation")
                     certificates.append(record["certificates"])
                     print(f"REPLY_CACHE_RANK {worker.rank}: payload peak {record['peak_reply_bytes']}; "
@@ -506,12 +530,16 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path, *, greedy: 
                 print(f"THREE_PROCESS_TRANSACTIONS_PASS: {label}; {steps} all-owner commits/retries; {token_count} tokens; "
                       f"byte-exact boundaries/logits; max error {maximum:.9g}; full admission NOT_VALIDATED")
                 print("CONTROL_RECONNECT_RETRY_PASS: fresh handshakes/counters; duplicate boundary/commit served from immutable replies; no extra graph calls")
-                print("COMPACT_TERMINAL_PASS: native C greedy token/top eight match independent oracle; 272 bytes per result; retry outcome unchanged")
+                print(f"COMPACT_TERMINAL_PASS: native C {'seeded sample' if sampled else 'greedy token'}/top eight match independent oracle; "
+                      f"{320 if sampled else 272} bytes per result; retry outcome unchanged")
+                print("SAMPLING_AGREEMENT_PASS: exact local policy acknowledged before BEGIN and after control reconnect; request hash binds canonical sampling identity")
                 print("AUTHENTICATED_BEGIN_PASS: B/C receive no token plan; A introduces actual request digest within locally expected state coordinates")
-                if greedy:
-                    print("AUTOREGRESSIVE_GREEDY_PASS: A receives only 17 prompt tokens; 16 actual committed C results drive next decode; independent sequence/boundaries/logits exact")
+                if feedback:
+                    print(f"AUTOREGRESSIVE_{'SAMPLED' if sampled else 'GREEDY'}_PASS: A receives only 17 prompt tokens; 16 actual committed C results drive next decode; independent sequence/boundaries/logits exact")
                 if recover_once:
                     print("RETAINED_WEIGHT_RESET_REPLAY_PASS: same three processes/owned models; two real contexts each; B source stays removed; newer epoch replays exact oracle")
+                    if sampled:
+                        print("MODEL_NATIVE_RNG_REPLAY_PASS: new C sampler replays seeded full-vocabulary draws through retained-model graphs; generated history and committed prefix exact")
                     if drop_chunk:
                         print(f"COMMITTED_RESPONSE_CURSOR_PASS: {replayed} old output rows verified during replay; {token_count-replayed} appended; exact {token_count}-row output without duplicates")
             finally:
@@ -519,9 +547,12 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path, *, greedy: 
                     worker.close()
                 key_file.unlink()
 
-        if greedy:
-            attempt("autoregressive-greedy", 1, False)
-            attempt("autoregressive-retained-prefix", 1, True, recover_once=True, drop_chunk=5)
+        if feedback:
+            policy = "sampled" if sampled else "greedy"
+            attempt(f"autoregressive-{policy}", 1, False)
+            attempt(f"autoregressive-{policy}-retained-prefix", 1, True, recover_once=True, drop_chunk=5)
+            if sampled:
+                attempt("sampling-policy-mismatch", 1, False, mismatch=True)
             return
         attempt("committed", 1, False)
         attempt("lost-ack", 1, True)
@@ -542,3 +573,4 @@ if __name__ == "__main__":
     run(args.oracle.resolve(strict=True), args.worker.resolve(strict=True), locked=True)
     run_transactions(args.oracle.resolve(strict=True), args.worker.resolve(strict=True))
     run_transactions(args.oracle.resolve(strict=True), args.worker.resolve(strict=True), greedy=True)
+    run_transactions(args.oracle.resolve(strict=True), args.worker.resolve(strict=True), sampled=True)

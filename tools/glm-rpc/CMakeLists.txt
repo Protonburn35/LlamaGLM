@@ -23,7 +23,7 @@ else()
     target_link_libraries(llama-glm-wire PRIVATE OpenSSL::Crypto)
 endif()
 
-add_library(llama-glm-sampling STATIC stage-sampling.cpp)
+add_library(llama-glm-sampling STATIC stage-sampling.cpp stage-sampling-codec.cpp)
 target_include_directories(llama-glm-sampling PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(llama-glm-sampling PUBLIC cxx_std_17)
 target_link_libraries(llama-glm-sampling PRIVATE llama-glm-wire llama)

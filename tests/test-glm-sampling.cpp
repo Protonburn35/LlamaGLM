@@ -1,4 +1,5 @@
 #include "stage-sampling.h"
+#include "stage-sampling-codec.h"
 #include "llama-cpp.h"
 
 #include <algorithm>
@@ -227,10 +228,128 @@ static void limits_and_values() {
     singleton.complete_after_global(one.certificate);
 }
 
+static header control(kind type, uint32_t from, uint32_t to, size_t bytes, const step_key * step = nullptr) {
+    header result; result.type = type; result.sender = from; result.receiver = to;
+    const auto epoch = step ? step->stamp : stamp();
+    result.session = epoch.session; result.epoch = epoch.epoch; result.generation = epoch.generation;
+    result.transaction = step ? step->transaction : 0; result.chunk = step ? step->chunk : 0; result.position = step ? step->position : 0;
+    result.payload_bytes = uint32_t(bytes); result.total_bytes = bytes; result.sequence = 1; return result;
+}
+
+static void agreement_codec() {
+    const auto cfg = config(true);
+    const auto proposal = encode_sampling_setup(cfg,stamp(),bounds());
+    const auto acknowledgement = encode_sampling_setup_ack(cfg,stamp(),bounds());
+    require(hex(sha256({{proposal.data(),proposal.size()}})) == "e1983492ee23cbba6c3ba033e5041ff31babe0e305b771798ca9131df6d1c660" &&
+            hex(sha256({{acknowledgement.data(),acknowledgement.size()}})) == "ec3dd9af534f7067d67f44c46411749795460f974778c9404ec03ae45ef464f4",
+            "sampling agreement differs from independent Python bytes");
+    for (uint32_t rank : {1u,2u}) {
+        auto request = control(kind::sampling_setup,0,rank,proposal.size());
+        auto ack = control(kind::sampling_setup_ack,rank,0,acknowledgement.size());
+        decode_sampling_setup(request,{proposal.data(),proposal.size()},rank,cfg,stamp(),bounds());
+        decode_sampling_setup_ack(ack,{acknowledgement.data(),acknowledgement.size()},rank,cfg,stamp(),bounds());
+        for (size_t size = 0; size < proposal.size(); ++size) {
+            request.payload_bytes = uint32_t(size); request.total_bytes = size;
+            refused([&] { decode_sampling_setup(request,{proposal.data(),size},rank,cfg,stamp(),bounds()); });
+        }
+        request = control(kind::sampling_setup,0,rank,proposal.size());
+        for (size_t offset = 0; offset < proposal.size(); ++offset) {
+            auto changed = proposal; changed[offset] ^= 1;
+            refused([&] { decode_sampling_setup(request,{changed.data(),changed.size()},rank,cfg,stamp(),bounds()); });
+        }
+        refused([&] { decode_sampling_setup(request,{acknowledgement.data(),acknowledgement.size()},rank,cfg,stamp(),bounds()); });
+        auto changed = cfg; ++changed.seed;
+        refused([&] { decode_sampling_setup_ack(ack,{acknowledgement.data(),acknowledgement.size()},rank,changed,stamp(),bounds()); });
+        request.sender = rank; request.receiver = 0;
+        refused([&] { decode_sampling_setup(request,{proposal.data(),proposal.size()},rank,cfg,stamp(),bounds()); });
+    }
+}
+
+static sampling_result codec_result(logits & input) {
+    sampling_transactions sampler(config(true),stamp(),bounds());
+    sampler.draw(input.receipt(),input.view());
+    auto result = sampler.complete_after_global(input.certificate);
+    result.selected_token = 0; result.selected_logit = input.tail[0];
+    return result;
+}
+
+static void result_codec() {
+    logits input(1,0); const auto result = codec_result(input); const auto cfg = config(true);
+    const auto encoded = encode_sampling_result(result,cfg,input.certificate,bounds());
+    require(hex(sha256({{encoded.data(),encoded.size()}})) == "1fdca30587e866b0eb81066221cbee1ecbe35bc787c87ac9fd8edbe0043c711f",
+            "sampled result differs from independent Python bytes");
+    auto frame = control(kind::sampled_result,2,0,encoded.size(),&input.receipt().step);
+    same_selection(result,decode_sampling_result(frame,{encoded.data(),encoded.size()},cfg,input.certificate,1,bounds()));
+    for (size_t size = 0; size < encoded.size(); ++size) {
+        frame.payload_bytes = uint32_t(size); frame.total_bytes = size;
+        refused([&] { decode_sampling_result(frame,{encoded.data(),size},cfg,input.certificate,1,bounds()); });
+    }
+    frame = control(kind::sampled_result,2,0,encoded.size(),&input.receipt().step);
+    for (size_t offset : {0u,8u,10u,12u,16u,48u,64u,72u,80u,88u,96u,104u,108u,112u,144u,176u,208u,216u,220u,232u,236u,240u,244u,312u}) {
+        auto changed = encoded; changed[offset] ^= 1;
+        refused([&] { decode_sampling_result(frame,{changed.data(),changed.size()},cfg,input.certificate,1,bounds()); });
+    }
+    for (int failure = 0; failure < 6; ++failure) {
+        auto changed = result;
+        if (failure == 0) { changed.selected_token = 128; }
+        if (failure == 1) { changed.selected_logit = 1; }
+        if (failure == 2) { changed.top[1] = changed.top[0]; }
+        if (failure == 3) { changed.top[0].logit = std::numeric_limits<float>::quiet_NaN(); }
+        if (failure == 4) { std::swap(changed.top[0],changed.top[1]); }
+        if (failure == 5) { changed.certificate_digest = {}; }
+        refused([&] { encode_sampling_result(changed,cfg,input.certificate,bounds()); });
+    }
+    refused([&] { decode_sampling_result(frame,{encoded.data(),encoded.size()},cfg,input.certificate,2,bounds()); });
+    auto changed = cfg; changed.temperature = 0.8f;
+    refused([&] { decode_sampling_result(frame,{encoded.data(),encoded.size()},changed,input.certificate,1,bounds()); });
+    frame.type = kind::terminal_result;
+    refused([&] { decode_sampling_result(frame,{encoded.data(),encoded.size()},cfg,input.certificate,1,bounds()); });
+    frame.type = kind::sampled_result;
+    uint32_t mutation = 53;
+    for (size_t i = 0; i < 2000; ++i) {
+        mutation = mutation*1664525u+1013904223u;
+        auto changed_bytes = encoded;
+        changed_bytes[mutation%changed_bytes.size()] ^= uint8_t(1u<<((mutation>>16)%8));
+        std::optional<sampling_result> accepted;
+        try { accepted = decode_sampling_result(frame,{changed_bytes.data(),changed_bytes.size()},cfg,input.certificate,1,bounds()); }
+        catch (const std::invalid_argument &) {}
+        if (accepted) { require(encode_sampling_result(*accepted,cfg,input.certificate,bounds()) == changed_bytes,"accepted mutation was not canonical"); }
+    }
+    auto narrow = cfg; narrow.candidates = 4;
+    sampling_transactions sampler(narrow,stamp(),bounds()); sampler.draw(input.receipt(),input.view());
+    auto limited = sampler.complete_after_global(input.certificate);
+    encode_sampling_result(limited,narrow,input.certificate,bounds());
+    limited.top[4] = limited.top[0];
+    refused([&] { encode_sampling_result(limited,narrow,input.certificate,bounds()); });
+}
+
+static void authenticated_sampling() {
+    logits input(1,0); const auto result = codec_result(input); const auto cfg = config(true);
+    const auto payload = encode_sampling_result(result,cfg,input.certificate,bounds());
+    secret psk{}; psk[0] = 53;
+    binding peer; peer.server_nonce[0] = 1; peer.client_nonce[0] = 2; peer.identity = stamp().identity;
+    peer.sender = 2; peer.receiver = 0; peer.link = channel::control;
+    const auto key = derive_link_key(psk,peer);
+    sender tx(key,peer,bounds()); receiver rx(key,peer,bounds());
+    const auto packet = tx.encode(control(kind::sampled_result,2,0,payload.size(),&input.receipt().step),{payload.data(),payload.size()});
+    wire_header raw{}; std::copy_n(packet.begin(),raw.size(),raw.begin());
+    const bytes_view body{packet.data()+raw.size(),packet.size()-raw.size()};
+    const auto authenticated = rx.authenticate(raw,body);
+    same_selection(result,decode_sampling_result(authenticated,body,cfg,input.certificate,1,bounds()));
+    auto changed = packet; changed.back() ^= 1;
+    receiver fresh(key,peer,bounds());
+    refused([&] { fresh.authenticate(raw,{changed.data()+raw.size(),changed.size()-raw.size()}); });
+    refused([&] { fresh.authenticate(raw,body); });
+    auto data_peer = peer; data_peer.link = channel::data;
+    sender wrong_channel(derive_link_key(psk,data_peer),data_peer,bounds());
+    refused([&] { wrong_channel.encode(control(kind::sampled_result,2,0,payload.size(),&input.receipt().step),{payload.data(),payload.size()}); });
+}
+
 int main() {
     try {
         configuration(); greedy(); distribution(); failures(); replay(); limits_and_values();
-        std::puts("GLM sampling: six suites passed (native full-vocabulary RNG, clone isolation, commit/retries, fail-closed conflicts, reset replay); stochastic wire/production serving NOT_IMPLEMENTED");
+        agreement_codec(); result_codec(); authenticated_sampling();
+        std::puts("GLM sampling: nine suites passed (native RNG/clone/retries/replay, canonical agreement/results, authenticated roles/configuration); production serving NOT_IMPLEMENTED");
         return 0;
     } catch (const std::exception & error) {
         std::fprintf(stderr,"GLM sampling test failed: %s\n",error.what()); return 1;

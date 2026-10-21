@@ -18,6 +18,8 @@ struct sampling_config {
 
 // Canonical versioned identity of every supported sampling parameter. Random sentinel
 // seeds, unknown policies and implicit configuration changes refuse.
+using sampling_config_wire = std::array<uint8_t,32>;
+sampling_config_wire canonical_sampling(const sampling_config & config);
 digest fingerprint_sampling(const sampling_config & config);
 
 struct sampling_result {

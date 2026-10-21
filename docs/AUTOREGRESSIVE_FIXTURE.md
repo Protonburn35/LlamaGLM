@@ -14,3 +14,6 @@ This qualifies deterministic greedy feedback and synthetic replay. Stochastic sa
 
 
 Native Windows qualification passes at c6dd1be50, run 39587356972, on CPU/SM89/SM120a hosted builds. Thirteen CTest targets, seven GLM tests and real-header schema pass; downloaded CPU evidence confirms both autoregressive attempts. A later extension routes C greedy selection through cloned native sampler transactions and expands the local gate to fourteen CTest targets. See TRANSACTIONAL_SAMPLING.md.
+
+
+A later explicit sampled profile now exercises native temperature/distribution feedback and RNG replay through the same real model graphs. All transactional control connections add exact 112-byte configuration setup/ACK before BEGIN and after reconnect, so the latest control byte totals supersede the earlier figures above. See SAMPLED_RESULTS.md.

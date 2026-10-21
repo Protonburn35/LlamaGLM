@@ -26,3 +26,6 @@ Nine TCP suites qualify successful authenticated bytes, partial EOF counts, dead
 These are synthetic CPU observations, including CUDA-linked builds that execute CPU fixtures. They are not a target-PC benchmark or a throughput guarantee. GPU timings, real model quantization, physical link behavior, TTFT/client output rates, attention/MoE subphases, queue occupancy, complete memory admission, clocks/thermals and full 1M execution remain unqualified. Socket/telemetry metadata and kernel buffers remain explicit residency/accounting gaps.
 
 Native telemetry qualification passes at 0ab6c9746 before BEGIN was introduced (7,360 control write bytes per A peer). The later local BEGIN extension raises that exact ledger to 9,792 and has its own pending native qualification.
+
+
+Exact local sampling setup/ACK adds two 272-byte framed writes and reads per A-peer control pair, one on each authenticated connection. The latest seeded 33-row profile writes 22,176 per A-peer, reads 15,584 from B and 24,224 from C (320-byte outcomes), while 33-row greedy reads 23,360 from C (272-byte outcomes). Forward data stays 105,440 with the repeated 17-row prompt. Independent ledger checks cover these new messages; see SAMPLED_RESULTS.md.

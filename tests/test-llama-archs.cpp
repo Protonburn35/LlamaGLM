@@ -152,6 +152,7 @@ static void usage(char ** argv) {
     LOG("      --glm-pipeline-streamed       Use microbatch 1 for that independent oracle\n");
     LOG("      --glm-pipeline-locked         Small 2/1/3 oracle for locked B host policy\n");
     LOG("      --glm-pipeline-greedy         Generate 16 feedback tokens after a 17-token prompt (requires locked)\n");
+    LOG("      --glm-pipeline-sampled        Use seeded native temperature/distribution feedback (requires locked)\n");
     LOG("  -h, --help               Show this help message\n\n");
     LOG("Examples:\n");
     LOG("  %s\n", argv[0]);
@@ -963,7 +964,7 @@ static gguf_context_ptr glm_locked_fixture_metadata() {
     return metadata;
 }
 
-static int write_glm_pipeline_fixture(const std::string & directory, size_t seed, float stdev, int verbosity, bool streamed, bool locked, bool greedy) {
+static int write_glm_pipeline_fixture(const std::string & directory, size_t seed, float stdev, int verbosity, bool streamed, bool locked, bool greedy, bool sampled) {
     common_log_set_verbosity_thold(verbosity);
     const uint32_t byte_order = 1;
     if (*reinterpret_cast<const uint8_t *>(&byte_order) != 1) { throw std::runtime_error("fixture files require a little-endian host"); }
@@ -999,9 +1000,14 @@ static int write_glm_pipeline_fixture(const std::string & directory, size_t seed
     params.cb_eval_user_data = &boundaries;
     llama_context_ptr oracle(llama_init_from_model(model.get(), params));
     if (!oracle) { throw std::runtime_error("cannot create monolithic pipeline oracle"); }
-    auto tokens = get_tokens(greedy ? 17 : 131, llama_vocab_n_tokens(llama_model_get_vocab(model.get())), seed);
-    std::vector<size_t> chunks = greedy ? std::vector<size_t>(17,1) : std::vector<size_t>{1,3,4,17,31,64,11};
-    if (greedy) { chunks[0] = 17; }
+    const bool feedback = greedy || sampled;
+    auto tokens = get_tokens(feedback ? 17 : 131, llama_vocab_n_tokens(llama_model_get_vocab(model.get())), seed);
+    std::vector<size_t> chunks = feedback ? std::vector<size_t>(17,1) : std::vector<size_t>{1,3,4,17,31,64,11};
+    if (feedback) { chunks[0] = 17; }
+    llama_sampler_ptr distribution(sampled ? llama_sampler_init_dist(53) : nullptr);
+    llama_sampler_ptr temperature(sampled ? llama_sampler_init_temp(0.75f) : nullptr);
+    if (sampled && (!distribution || !temperature)) { throw std::runtime_error("cannot create independent oracle samplers"); }
+    std::vector<llama_token> selections;
     uint64_t payload_bytes = 0;
     for (const auto & tensor : model->tensors_by_name) { payload_bytes += ggml_nbytes(tensor.second); }
     if (!payload_bytes || payload_bytes > (128ull << 20)) { throw std::runtime_error("invalid oracle payload byte inventory"); }
@@ -1024,10 +1030,20 @@ static int write_glm_pipeline_fixture(const std::string & directory, size_t seed
         }
         outputs[2].write(reinterpret_cast<const char *>(logits), count * 128 * sizeof(float));
         position += count;
-        if (greedy && position < 33) {
+        if (feedback) {
             const auto * tail = logits + (count-1)*128;
-            const auto selected = std::max_element(tail,tail+128) - tail;
-            tokens.push_back(llama_token(selected));
+            llama_token selected = llama_token(std::max_element(tail,tail+128) - tail);
+            if (sampled) {
+                std::vector<llama_token_data> candidates(128);
+                for (size_t i = 0; i < candidates.size(); ++i) { candidates[i] = {llama_token(i),tail[i],0}; }
+                llama_token_data_array values{candidates.data(),candidates.size(),-1,false};
+                llama_sampler_apply(temperature.get(),&values); llama_sampler_apply(distribution.get(),&values);
+                if (values.selected < 0 || size_t(values.selected) >= values.size) { throw std::runtime_error("oracle sampler did not select a token"); }
+                selected = values.data[values.selected].id;
+                llama_sampler_accept(distribution.get(),selected);
+            }
+            selections.push_back(selected);
+            if (position < 33) { tokens.push_back(selected); }
         }
     }
     for (auto & output : outputs) {
@@ -1038,7 +1054,8 @@ static int write_glm_pipeline_fixture(const std::string & directory, size_t seed
     requests << "{\"version\":1,\"context\":256,\"hidden\":128,\"vocab\":128,\"model_payload_bytes\":" << payload_bytes
              << ",\"microbatch\":" << params.n_ubatch
              << ",\"layer_ends\":[" << ends[0] << "," << ends[1] << "," << ends[2] << "]";
-    if (greedy) { requests << ",\"generation_mode\":\"greedy\",\"prompt_rows\":17"; }
+    if (feedback) { requests << ",\"generation_mode\":\"" << (sampled ? "sampled" : "greedy") << "\",\"prompt_rows\":17"; }
+    if (sampled) { requests << ",\"sampling\":{\"mode\":2,\"seed\":53,\"temperature\":0.75,\"candidates\":8}"; }
     requests << ",\"chunks\":[";
     for (size_t i = 0; i < chunks.size(); ++i) { requests << (i ? "," : "") << chunks[i]; }
     requests << "],\"tokens\":[";
@@ -1046,6 +1063,12 @@ static int write_glm_pipeline_fixture(const std::string & directory, size_t seed
     requests << "]}\n";
     requests.close();
     if (!requests) { throw std::runtime_error("cannot write pipeline requests"); }
+    if (sampled) {
+        std::ofstream selected(path / "oracle-selected.json"); selected << "[";
+        for (size_t i = 0; i < selections.size(); ++i) { selected << (i ? "," : "") << selections[i]; }
+        selected << "]\n"; selected.close();
+        if (!selected) { throw std::runtime_error("cannot write oracle sampled selections"); }
+    }
     std::printf("GLM pipeline oracle: synthetic six-layer model, %zu tokens, two independent boundaries and logits written\n",position);
     common_log_flush(common_log_main());
     return 0;
@@ -2112,6 +2135,7 @@ int main(int argc, char ** argv) {
     bool pipeline_streamed = false;
     bool pipeline_locked = false;
     bool pipeline_greedy = false;
+    bool pipeline_sampled = false;
     const char * target_backend = nullptr;
 
     int verbosity = LOG_LEVEL_ERROR;
@@ -2176,6 +2200,8 @@ int main(int argc, char ** argv) {
             pipeline_locked = true;
         } else if (strcmp(argv[i], "--glm-pipeline-greedy") == 0) {
             pipeline_greedy = true;
+        } else if (strcmp(argv[i], "--glm-pipeline-sampled") == 0) {
+            pipeline_sampled = true;
         } else if (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--backend") == 0) {
             if (i + 1 < argc) {
                 const char * backend_name = argv[++i];
@@ -2205,10 +2231,11 @@ int main(int argc, char ** argv) {
         if (!pipeline_fixture.empty()) {
             if (!out.empty() || !arch_filter.empty() || target_backend) { throw std::invalid_argument("pipeline fixture generation is a separate CPU mode"); }
             if (pipeline_streamed && pipeline_locked) { throw std::invalid_argument("choose one pipeline oracle profile"); }
-            if (pipeline_greedy && !pipeline_locked) { throw std::invalid_argument("greedy oracle requires the locked fixture profile"); }
-            return write_glm_pipeline_fixture(pipeline_fixture, seed, stdev, verbosity, pipeline_streamed, pipeline_locked, pipeline_greedy);
+            if ((pipeline_greedy || pipeline_sampled) && !pipeline_locked) { throw std::invalid_argument("feedback oracle requires the locked fixture profile"); }
+            if (pipeline_greedy && pipeline_sampled) { throw std::invalid_argument("choose one feedback policy"); }
+            return write_glm_pipeline_fixture(pipeline_fixture, seed, stdev, verbosity, pipeline_streamed, pipeline_locked, pipeline_greedy, pipeline_sampled);
         }
-        if (pipeline_streamed || pipeline_locked || pipeline_greedy) { throw std::invalid_argument("pipeline oracle profile requires --glm-pipeline-fixture"); }
+        if (pipeline_streamed || pipeline_locked || pipeline_greedy || pipeline_sampled) { throw std::invalid_argument("pipeline oracle profile requires --glm-pipeline-fixture"); }
         if (!out.empty()) {
             return save_models(arch_filter, seed, stdev, verbosity, out);
         }

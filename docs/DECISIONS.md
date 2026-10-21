@@ -87,3 +87,6 @@
 
 
 - Keep RNG advancement transactional: hash the complete actual C output, clone the committed native sampler for a pending draw, reuse that selection on retries and promote only after separately verified global completion. Reuse the existing owner ledger for contiguous identity/position checks. Bind every supported sampler parameter canonically; keep diagnostics separate from the full distribution and stochastic wire disabled until configuration agreement exists.
+
+
+- Agree exact local sampling configuration before model BEGIN, including after healthy control reconnect, and require both distinct owner acknowledgements at A. Keep agreement separate from resource admission/READY. Bind canonical policy identity into actual fixture request hashes and a distinct sampled result with the committed native draw ordinal; preserve the existing greedy-only format. Qualify real seeded feedback and retained-model RNG replay against an independent native monolithic oracle.

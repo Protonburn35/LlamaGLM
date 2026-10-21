@@ -49,13 +49,18 @@ llama_sampler_ptr make_sampler(const sampling_config & config) {
 
 } // namespace
 
-digest fingerprint_sampling(const sampling_config & config) {
+sampling_config_wire canonical_sampling(const sampling_config & config) {
     validate_config(config);
     std::array<uint8_t,32> encoded{'G','L','M','S','A','M','P',0};
     size_t offset = 8;
     for (const uint32_t value : {1u,uint32_t(config.mode),config.vocabulary,config.seed,bits(config.temperature),config.candidates}) {
         for (size_t i = 0; i < 4; ++i) { encoded[offset++] = uint8_t(value >> (8*i)); }
     }
+    return encoded;
+}
+
+digest fingerprint_sampling(const sampling_config & config) {
+    const auto encoded = canonical_sampling(config);
     return sha256({{encoded.data(),encoded.size()}});
 }
 

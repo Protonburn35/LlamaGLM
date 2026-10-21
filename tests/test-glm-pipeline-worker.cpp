@@ -8,6 +8,7 @@
 #include "gguf.h"
 #include "stage-net.h"
 #include "stage-identity.h"
+#include "stage-boundary.h"
 
 #include <nlohmann/json.hpp>
 
@@ -69,6 +70,7 @@ static execution_identity fixture_identity(const std::string & path) {
     value.target_layers = report.target_layers; value.nextn_layers = report.nextn_layers;
     value.experts = 16; value.layer_ends = {2, 4, 6};
     value.bounds.hidden = 128; value.bounds.rows = 64; value.bounds.context = 256;
+    value.bounds.frame_bytes = 64u << 10;
     return value;
 }
 
@@ -167,19 +169,19 @@ int main(int argc, char ** argv) {
         size_t position = 0;
         for (size_t chunk = 0; chunk < expected_chunks.size(); ++chunk) {
             const uint32_t count = expected_chunks[chunk];
+            header metadata;
+            metadata.epoch = metadata.generation = 1;
+            metadata.transaction = chunk + 1; metadata.chunk = chunk;
+            metadata.session[0] = 1; metadata.position = position;
+            metadata.rows = count; metadata.hidden = 128; metadata.streams = 4;
+            metadata.element = dtype::f32;
             common_batch batch(context.get());
             std::vector<float> input;
             if (rank == 0) {
                 for (uint32_t row = 0; row < count; ++row) { batch.add(tokens.at(position + row), position + row, 0, false); }
             } else {
-                const auto message = read_frame(incoming, *rx, shortly());
-                session_id expected_session{}; expected_session[0] = 1;
-                require(message.metadata.chunk == chunk && message.metadata.transaction == chunk + 1 &&
-                        message.metadata.epoch == 1 && message.metadata.generation == 1 && message.metadata.session == expected_session &&
-                        message.metadata.position == position && message.metadata.rows == count && message.metadata.fragments == 1 &&
-                        message.payload.size() == count * 512 * sizeof(float), "fixture boundary coordinates differ");
-                input.resize(count * 512);
-                std::memcpy(input.data(), message.payload.data(), message.payload.size());
+                metadata.sender = rank - 1; metadata.receiver = rank;
+                input = receive_boundary(incoming, *rx, metadata, bounds, uint64_t(bounds.rows) * 512 * sizeof(float), shortly());
                 for (uint32_t row = 0; row < count; ++row) {
                     const llama_pos pos = position + row;
                     batch.add_embd({input.data() + row * 512, 1, 512}, &pos, 0, rank == 2);
@@ -192,14 +194,8 @@ int main(int argc, char ** argv) {
             output.write(reinterpret_cast<const char *>(values), bytes);
             require(bool(output), "cannot write fixture worker output");
             if (rank < 2) {
-                header metadata;
                 metadata.sender = rank; metadata.receiver = rank + 1;
-                metadata.epoch = metadata.generation = 1;
-                metadata.transaction = chunk + 1; metadata.chunk = chunk;
-                metadata.session[0] = 1; metadata.position = position;
-                metadata.rows = count; metadata.hidden = 128; metadata.streams = 4;
-                metadata.element = dtype::f32; metadata.total_bytes = bytes;
-                write_frame(outgoing, *tx, metadata, {reinterpret_cast<const uint8_t *>(values), bytes}, shortly());
+                send_boundary(outgoing, *tx, metadata, bounds, values, count * 512, shortly());
             }
             position += count;
         }

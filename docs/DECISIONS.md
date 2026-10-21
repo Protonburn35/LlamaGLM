@@ -26,3 +26,5 @@
 - Validate complete descriptors through a guarded no-allocation native loader mode, rather than duplicating attention/KDA/NextN shape tables. Require real descriptors, including unknown-tensor count rejection; do not use the synthetic provider path as a schema validator. Keep payload verification and runtime admission false after metadata validation.
 
 - Bind the complete execution contract with system SHA256 over explicit little-endian fields and length-prefixed ASCII identifiers. Hash bounded GGUF headers (including tokenizer/template metadata) and declared file sizes/revisions; do not require full-weight checksum passes. Treat this identity as a compatibility check, not payload integrity, binary attestation or resource admission.
+
+- Receive a complete locally planned activation chunk before mutating model state. Authenticate every bounded fragment, require exact semantic coordinates and increasing fragment indices, cap the single input buffer by a local reservation, and permanently interrupt/discard on any error. Keep whole-chunk transport completion distinct from distributed model commit/reset.

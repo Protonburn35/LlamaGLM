@@ -158,21 +158,29 @@ memory_experts::memory_experts(uint64_t byte_budget, size_t entry_budget, uint64
 }
 
 void memory_experts::preload(expert_address address, const uint8_t * data, size_t bytes) {
-    if (sealed || !data || address.file >= 100 || bytes == 0 || address.bytes != bytes || bytes > max_expert_read_bytes || bytes > budget - used ||
+    if (!data || address.bytes != bytes) { throw std::invalid_argument("invalid expert preload bytes"); }
+    preload_with(address, [data](uint8_t * output, size_t count) { std::memcpy(output, data, count); });
+}
+
+void memory_experts::preload_with(expert_address address, const std::function<void(uint8_t *, size_t)> & reader) {
+    const auto bytes = size_t(address.bytes);
+    if (sealed || preloading || !reader || address.file >= 100 || address.bytes == 0 || address.bytes > max_expert_read_bytes || address.bytes > budget - used ||
             address.offset > (1ull << 44) - bytes || entries.size() >= entry_budget || entries.count(address)) {
         throw std::invalid_argument("GLM expert preload is sealed, duplicated or exceeds local bounds");
     }
     const uint64_t pages = lock_budget ? expert_buffer::required_locked_bytes(bytes) : 0;
     if (pages > lock_budget - locked_used) { throw std::invalid_argument("expert payload exceeds the separate page-lock budget"); }
+    struct preload_guard { bool & active; ~preload_guard() { active = false; } } guard{preloading};
+    preloading = true;
     auto values = std::make_shared<expert_buffer>(bytes, lock_budget != 0);
-    std::memcpy(values->data(), data, bytes);
+    reader(values->data(), bytes);
     entries.emplace(address, std::move(values));
     used += bytes;
     locked_used += pages;
 }
 
 void memory_experts::seal(const std::vector<expert_address> & complete_owned_catalog) {
-    if (sealed || complete_owned_catalog.empty() || complete_owned_catalog.size() != entries.size()) {
+    if (sealed || preloading || complete_owned_catalog.empty() || complete_owned_catalog.size() != entries.size()) {
         throw std::invalid_argument("GLM resident catalog is incomplete or already sealed");
     }
     std::set<expert_address> unique;

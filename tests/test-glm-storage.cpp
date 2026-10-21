@@ -184,15 +184,23 @@ static void sealed_store() {
 static void locked_payload_store() {
     fixture f;
     const auto baseline = expert_buffer::locked_stats();
-    const expert_address a{0, 7, 64}, b{0, 91, 128}, absent{0, 999, 64};
+    const expert_address a{0, 0, 64}, b{0, 64, 128}, absent{0, 999, 64};
     const uint64_t first_pages = expert_buffer::required_locked_bytes(64);
     const uint64_t total_pages = first_pages + expert_buffer::required_locked_bytes(128);
     expert_lease retained;
     {
         memory_experts store(192, 2, total_pages);
         refused([&] { store.acquire(a); });
-        store.preload(a, f.data.data(), 64);
-        store.preload(b, f.data.data() + 64, 128);
+        std::weak_ptr<expert_file> startup_reader;
+        {
+            const auto file = std::make_shared<expert_file>(f.file);
+            startup_reader = file;
+            for (const auto address : {a,b}) {
+                store.preload_with(address, [file,address](uint8_t * output, size_t bytes) { file->read_exact(address.offset, output, bytes); });
+            }
+            require(file->stats().requests == 2 && file->stats().bytes == 192, "locked startup did not read the exact complete payloads");
+        }
+        require(startup_reader.expired(), "memory source retained its startup file reader");
         require(!store.payloads_locked() && store.locked_bytes() == total_pages && total_pages > store.payload_bytes(),
                 "unsealed page-locked store has wrong payload/rounded-page accounting");
         refused([&] { store.verify_payload_locks(); });
@@ -252,6 +260,23 @@ static void locked_payload_bounds() {
         bounded.seal({a});
         bounded.verify_payload_locks();
         refused([&] { bounded.acquire(b); });
+    }
+    {
+        memory_experts failed_reader(128, 2, 2 * page);
+        failed_reader.preload(a, f.data.data(), 64);
+        bool invoked = false;
+        refused([&] { failed_reader.preload_with(b, [&](uint8_t * output, size_t) {
+            invoked = true;
+            output[0] = 99;
+            refused([&] { failed_reader.preload(b, f.data.data() + 64, 64); });
+            refused([&] { failed_reader.seal({a}); });
+            throw std::runtime_error("injected partial startup read failure");
+        }); });
+        require(invoked && failed_reader.payload_bytes() == 64 && failed_reader.locked_bytes() == page &&
+                expert_buffer::locked_stats().bytes == before.bytes + page, "failed startup reader leaked/published its locked buffer");
+        failed_reader.seal({a});
+        failed_reader.verify_payload_locks();
+        refused([&] { failed_reader.acquire(b); });
     }
     memory_experts plain(64, 1);
     plain.preload(a, f.data.data(), 64);

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <vector>
@@ -79,7 +80,11 @@ using expert_lease = std::shared_ptr<const expert_buffer>;
 class memory_experts {
 public:
     memory_experts(uint64_t byte_budget, size_t entry_budget, uint64_t page_lock_budget = 0);
+    memory_experts(const memory_experts &) = delete;
+    memory_experts & operator=(const memory_experts &) = delete;
     void preload(expert_address address, const uint8_t * data, size_t bytes);
+    // Startup only; invoke and discard the reader before publishing this payload. No callback is retained.
+    void preload_with(expert_address address, const std::function<void(uint8_t *, size_t)> & reader);
     void seal(const std::vector<expert_address> & complete_owned_catalog);
     expert_lease acquire(expert_address address) const;
     uint64_t payload_bytes() const { return used; }
@@ -92,7 +97,7 @@ private:
     uint64_t used = 0;
     uint64_t lock_budget = 0, locked_used = 0;
     size_t entry_budget;
-    bool sealed = false;
+    bool sealed = false, preloading = false;
     std::map<expert_address, expert_lease> entries;
 };
 

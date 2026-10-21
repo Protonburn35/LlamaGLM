@@ -1,14 +1,48 @@
 #include "stage-session-codec.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <limits>
 #include <stdexcept>
 
 namespace glm_rpc {
 namespace {
 
 constexpr std::array<uint8_t, 8> magic{'G','L','M','T','X','N',0,0};
-constexpr uint16_t format_version = 1, receipt_kind = 1, commit_kind = 2, commit_ack_kind = 3, completion_kind = 4;
+constexpr uint16_t format_version = 1, receipt_kind = 1, commit_kind = 2, commit_ack_kind = 3, completion_kind = 4, terminal_kind = 5;
 static_assert(commit_wire_bytes <= max_control_bytes, "transaction certificate must fit one bounded control frame");
+static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559, "terminal logits require IEEE binary32");
+
+uint32_t float_bits(float value) { uint32_t bits; std::memcpy(&bits,&value,sizeof(bits)); return bits; }
+float from_bits(uint32_t bits) { float value; std::memcpy(&value,&bits,sizeof(value)); return value; }
+
+void validate_terminal(const terminal_outcome & value, const limits & bounds) {
+    validate_step(value.step,bounds);
+    if (value.certificate_digest == digest{} || !value.vocabulary || value.vocabulary > (1u<<20) ||
+            value.selected_token >= value.vocabulary || !std::isfinite(value.selected_logit) || value.mode != 1 ||
+            !value.count || value.count > value.top.size() || value.count > value.vocabulary || value.row != value.step.rows-1) {
+        throw std::invalid_argument("invalid stateless greedy terminal outcome");
+    }
+    for (size_t i = 0; i < value.top.size(); ++i) {
+        const auto & candidate = value.top[i];
+        if (i >= value.count) {
+            if (candidate.token || float_bits(candidate.logit)) { throw std::invalid_argument("nonzero unused terminal candidate"); }
+            continue;
+        }
+        if (candidate.token >= value.vocabulary || !std::isfinite(candidate.logit)) { throw std::invalid_argument("invalid terminal candidate"); }
+        for (size_t previous = 0; previous < i; ++previous) {
+            if (candidate.token == value.top[previous].token) { throw std::invalid_argument("duplicate terminal candidate token"); }
+        }
+        if (i && (candidate.logit > value.top[i-1].logit ||
+                (candidate.logit == value.top[i-1].logit && candidate.token < value.top[i-1].token))) {
+            throw std::invalid_argument("terminal candidates are not in canonical greedy order");
+        }
+    }
+    if (value.selected_token != value.top[0].token || float_bits(value.selected_logit) != float_bits(value.top[0].logit)) {
+        throw std::invalid_argument("selected greedy outcome differs from the first candidate");
+    }
+}
 
 template<size_t N> struct writer {
     std::array<uint8_t, N> output{};
@@ -143,6 +177,17 @@ completion_wire encode_commit_completion(const commit_certificate & committed, c
     return encoded.finish();
 }
 
+terminal_wire encode_terminal_outcome(const terminal_outcome & outcome, const limits & bounds) {
+    validate_terminal(outcome,bounds);
+    writer<terminal_wire_bytes> encoded;
+    encoded.prefix(terminal_kind); encoded.key(outcome.step); encoded.block(outcome.certificate_digest);
+    encoded.integer(2,4); encoded.integer(outcome.vocabulary,4); encoded.integer(outcome.selected_token,4);
+    encoded.integer(float_bits(outcome.selected_logit),4);
+    encoded.integer(outcome.mode,4); encoded.integer(outcome.count,4); encoded.integer(outcome.row,4); encoded.integer(0,4);
+    for (const auto & candidate : outcome.top) { encoded.integer(candidate.token,4); encoded.integer(float_bits(candidate.logit),4); }
+    return encoded.finish();
+}
+
 owner_receipt decode_applied_receipt(bytes_view payload, uint32_t authenticated_rank, const step_key & expected, const limits & bounds) {
     if (authenticated_rank > 2) { throw std::invalid_argument("invalid authenticated receipt rank"); }
     reader encoded(payload, receipt_wire_bytes, receipt_kind);
@@ -213,6 +258,28 @@ void decode_commit_completion(const header & authenticated, bytes_view payload, 
     if (!(key == expected) || fingerprint != expected_certificate) {
         throw std::invalid_argument("global completion differs from the local committed decision");
     }
+}
+
+terminal_outcome decode_terminal_outcome(const header & authenticated, bytes_view payload, const step_key & expected,
+        const digest & expected_certificate, uint32_t expected_vocabulary, uint32_t expected_candidates, const limits & bounds) {
+    check_control(authenticated,kind::terminal_result,payload,expected);
+    if (authenticated.sender != 2 || authenticated.receiver != 0 || expected_certificate == digest{} ||
+            !expected_vocabulary || expected_vocabulary > (1u<<20) || !expected_candidates || expected_candidates > 8) {
+        throw std::invalid_argument("terminal result requires C-to-A and an explicit pending committed expectation");
+    }
+    reader encoded(payload,terminal_wire_bytes,terminal_kind);
+    terminal_outcome result; result.step = encoded.key(); encoded.block(result.certificate_digest);
+    if (encoded.integer(4) != 2) { throw std::invalid_argument("terminal payload requires rank C"); }
+    result.vocabulary = uint32_t(encoded.integer(4)); result.selected_token = uint32_t(encoded.integer(4));
+    result.selected_logit = from_bits(uint32_t(encoded.integer(4)));
+    result.mode = uint32_t(encoded.integer(4)); result.count = uint32_t(encoded.integer(4)); result.row = uint32_t(encoded.integer(4)); encoded.reserved();
+    for (auto & candidate : result.top) { candidate.token = uint32_t(encoded.integer(4)); candidate.logit = from_bits(uint32_t(encoded.integer(4))); }
+    encoded.finish(); validate_terminal(result,bounds);
+    if (!(result.step == expected) || result.certificate_digest != expected_certificate ||
+            result.vocabulary != expected_vocabulary || result.count != expected_candidates) {
+        throw std::invalid_argument("terminal outcome differs from its pending key/certificate/sampling expectation");
+    }
+    return result;
 }
 
 } // namespace glm_rpc

@@ -64,3 +64,5 @@ A bounded immutable reply component now captures applied outputs and retains one
 The actual process fixture now also recreates every context/ledger/reply cache against retained owned models after a first-step uncertain commit. A test-controller pipe waits for all-owner invalidation/zero output and supplies a fresh session/newer generation before replay. It is not the production authenticated reset/history protocol. See TRANSACTION_FIXTURE.md.
 
 The fixture now also preserves a committed response row cursor while resetting/replaying the actual input/context cursor. A fixed hash journal verifies already globally completed rows and suppresses duplicate output appends across recovery after 1-row or 56-row prefixes. Production client/RNG history remains absent. See TRANSACTION_FIXTURE.md.
+
+A compact committed terminal outcome codec (kind 5, 272 bytes; envelope 16) now supports explicitly limited stateless greedy C-to-A results with exact raw FP32 candidates. It matches the full pending key/certificate and local vocabulary/count. Thirteen session suites pass, including independent golden bytes and malformed candidate/configuration refusal. See TERMINAL_RESULTS.md.

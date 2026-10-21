@@ -139,9 +139,40 @@ static void connect_controls(uint32_t rank, std::array<fixture_control, 3> & con
     }
 }
 
+static terminal_outcome greedy_outcome(const reply_lease & reply, const commit_certificate & certificate, const limits & bounds) {
+    const auto bytes = reply->payload();
+    const auto & step = reply->receipt().step;
+    require(reply->receipt().rank == 2 && bytes.size == size_t(step.rows)*128*sizeof(float), "invalid terminal fixture logits");
+    std::vector<llama_token_data> candidates(128);
+    for (uint32_t token = 0; token < candidates.size(); ++token) {
+        float score; std::memcpy(&score,bytes.data+((step.rows-1)*128+token)*sizeof(float),sizeof(float));
+        candidates[token] = {llama_token(token),score,0};
+    }
+    llama_sampler_ptr sampler(llama_sampler_init_greedy());
+    require(bool(sampler), "cannot create native terminal greedy sampler");
+    llama_token_data_array native{candidates.data(),candidates.size(),-1,false};
+    llama_sampler_apply(sampler.get(),&native);
+    require(native.selected >= 0 && size_t(native.selected) < native.size, "native terminal sampler did not select a token");
+    terminal_outcome result; result.step = step; result.certificate_digest = fingerprint_commit(certificate,bounds);
+    result.vocabulary = 128; result.selected_token = uint32_t(native.data[native.selected].id);
+    result.selected_logit = native.data[native.selected].logit; result.count = 8; result.row = step.rows-1;
+    std::sort(candidates.begin(),candidates.end(),[](const auto & a, const auto & b) {
+        return a.logit == b.logit ? a.id < b.id : a.logit > b.logit;
+    });
+    for (size_t i = 0; i < result.count; ++i) { result.top[i] = {uint32_t(candidates[i].id),candidates[i].logit}; }
+    return result;
+}
+
+static json terminal_evidence(const terminal_outcome & result) {
+    const auto bits = [](float value) { uint32_t encoded; std::memcpy(&encoded,&value,sizeof(encoded)); return encoded; };
+    json top = json::array();
+    for (size_t i = 0; i < result.count; ++i) { top.push_back({result.top[i].token,bits(result.top[i].logit)}); }
+    return {{"token",result.selected_token},{"logit_bits",bits(result.selected_logit)},{"row",result.row},{"top",top}};
+}
+
 static commit_certificate finish_transaction(uint32_t rank, const step_key & step, const owner_receipt & receipt,
         owner_transactions & ledger, reply_cache & replies, std::array<fixture_control, 3> & controls,
-        const limits & bounds, bool drop_ack) {
+        const limits & bounds, bool drop_ack, std::optional<terminal_outcome> & terminal, size_t & terminal_transfers) {
     commit_certificate decision;
     if (rank == 0) {
         commit_barrier barrier(step, bounds);
@@ -171,6 +202,10 @@ static commit_certificate finish_transaction(uint32_t rank, const step_key & ste
         for (uint32_t remote : {1u, 2u}) {
             send_control(controls[remote], step, kind::commit_complete, 0, remote, {completion.data(), completion.size()});
         }
+        auto & link = controls[2];
+        const auto result = read_frame(link.socket,*link.rx,shortly());
+        terminal = decode_terminal_outcome(result.metadata,{result.payload.data(),result.payload.size()},step,fingerprint,128,8,bounds);
+        ++terminal_transfers;
     } else {
         auto & link = controls[0];
         const auto encoded = encode_applied_receipt(receipt, bounds);
@@ -186,6 +221,14 @@ static commit_certificate finish_transaction(uint32_t rank, const step_key & ste
         const auto complete = read_frame(link.socket, *link.rx, shortly());
         decode_commit_completion(complete.metadata, {complete.payload.data(), complete.payload.size()},
             step, acknowledged.certificate_digest, bounds);
+        if (rank == 2) {
+            if (!terminal || !(terminal->step == step) || terminal->certificate_digest != acknowledged.certificate_digest) {
+                terminal = greedy_outcome(replies.committed_reply(step),decision,bounds);
+            }
+            const auto payload = encode_terminal_outcome(*terminal,bounds);
+            send_control(link,step,kind::terminal_result,2,0,{payload.data(),payload.size()});
+            ++terminal_transfers;
+        }
     }
     return decision;
 }
@@ -443,6 +486,9 @@ int main(int argc, char ** argv) {
                     preloaded ? reply_memory::locked : reply_memory::pageable});
             }
             json commits = json::array();
+            json terminal_results = json::array();
+            std::optional<terminal_outcome> terminal;
+            size_t terminal_transfers = 0;
             size_t executions = 0, committed_retries = 0, network_retries = 0;
             size_t replayed_rows = 0, new_output_rows = 0;
             size_t position = 0;
@@ -491,7 +537,9 @@ int main(int argc, char ** argv) {
                     send_boundary(outgoing, *tx, metadata, bounds, values, count * 512, shortly());
                 }
                 if (transactional) {
-                    const auto decision = finish_transaction(rank, step, *receipt, *ledger, *replies, controls, bounds, drop_ack && chunk == plan.drop_chunk);
+                    const auto decision = finish_transaction(rank, step, *receipt, *ledger, *replies, controls, bounds,
+                        drop_ack && chunk == plan.drop_chunk,terminal,terminal_transfers);
+                    if (rank != 1) { require(bool(terminal), "missing committed terminal result"); terminal_results.push_back(terminal_evidence(*terminal)); }
                     const auto committed_hash = fingerprint_commit(decision, bounds);
                     std::string encoded_hash;
                     for (const auto byte : committed_hash) {
@@ -524,7 +572,11 @@ int main(int argc, char ** argv) {
                             duplicate.sender = rank; duplicate.receiver = rank+1;
                             send_boundary_bytes(outgoing, *tx, duplicate, bounds, replay->payload(), shortly());
                         }
-                        const auto repeated = finish_transaction(rank, step, replay->receipt(), *ledger, *replies, controls, bounds, false);
+                        const auto original_terminal = terminal;
+                        const auto repeated = finish_transaction(rank, step, replay->receipt(), *ledger, *replies, controls, bounds,
+                            false,terminal,terminal_transfers);
+                        if (rank != 1) { require(encode_terminal_outcome(*terminal,bounds) == encode_terminal_outcome(*original_terminal,bounds),
+                            "committed terminal retry changed its sampled outcome"); }
                         require(fingerprint_commit(repeated,bounds) == committed_hash && ledger->committed_position() == position+count,
                                 "reconnected retry changed its complete certificate or committed position");
                         ++network_retries;
@@ -573,6 +625,7 @@ int main(int argc, char ** argv) {
                 const json evidence{{"rank",rank}, {"generation",generation}, {"executions",executions}, {"model_loads",model_loads}, {"contexts_created",contexts_created},
                     {"committed_retries",committed_retries}, {"committed_position",ledger->committed_position()},
                     {"network_retries",network_retries},
+                    {"terminal_results",terminal_results}, {"terminal_payload_bytes",terminal_transfers*terminal_wire_bytes},
                     {"replayed_rows",replayed_rows}, {"new_output_rows",new_output_rows}, {"published_rows",published_rows},
                     {"certificates",commits}, {"reply_bytes",retained.payload_bytes}, {"peak_reply_bytes",retained.peak_payload_bytes},
                     {"reply_page_bytes",retained.page_bytes}, {"peak_reply_page_bytes",retained.peak_page_bytes},

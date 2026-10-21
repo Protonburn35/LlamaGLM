@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <memory>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -570,12 +571,59 @@ static void committed_ack_codec() {
     erase_secret(derived);
 }
 
+static void terminal_codec() {
+    const auto certificate = codec_fixture();
+    const auto bounds = small_bounds();
+    terminal_outcome result; result.step = certificate.owners[0].step;
+    result.certificate_digest = fingerprint_commit(certificate,bounds); result.vocabulary = 128;
+    result.selected_token = 5; result.selected_logit = 1.25f; result.count = 2; result.row = 3;
+    result.top[0] = {5,1.25f}; result.top[1] = {7,0.5f};
+    const auto payload = encode_terminal_outcome(result,bounds);
+    require(hex(sha256({{payload.data(),payload.size()}})) == "abd5a28d247dbd2840987d290c14db2a5e1fbc8292a63fd77e30fd31f7488b47",
+            "terminal outcome differs from independent Python golden bytes");
+    header metadata; metadata.type = kind::terminal_result; metadata.sender = 2; metadata.receiver = 0;
+    metadata.session = result.step.stamp.session; metadata.epoch = result.step.stamp.epoch; metadata.generation = result.step.stamp.generation;
+    metadata.transaction = result.step.transaction; metadata.chunk = result.step.chunk; metadata.position = result.step.position;
+    metadata.payload_bytes = uint32_t(payload.size()); metadata.total_bytes = payload.size(); metadata.sequence = 1;
+    const auto decode = [&](const header & envelope, bytes_view input) {
+        return decode_terminal_outcome(envelope,input,result.step,result.certificate_digest,128,2,bounds);
+    };
+    require(encode_terminal_outcome(decode(metadata,{payload.data(),payload.size()}),bounds) == payload, "terminal round trip differs");
+    for (size_t length = 0; length < payload.size(); ++length) {
+        auto short_header = metadata; short_header.payload_bytes = uint32_t(length); short_header.total_bytes = length;
+        refused([&] { decode(short_header,{payload.data(),length}); });
+    }
+    refused([&] { decode(metadata,{nullptr,payload.size()}); });
+    for (size_t offset : {size_t(0),size_t(8),size_t(10),size_t(12),size_t(16),size_t(144),size_t(176),size_t(180),
+            size_t(184),size_t(188),size_t(192),size_t(196),size_t(200),size_t(204),size_t(208),size_t(212),size_t(216),size_t(224),size_t(271)}) {
+        auto wrong = payload; wrong[offset] ^= 0x80;
+        refused([&] { decode(metadata,{wrong.data(),wrong.size()}); });
+    }
+    auto wrong_role = metadata; wrong_role.sender = 1;
+    refused([&] { decode(wrong_role,{payload.data(),payload.size()}); });
+    auto wrong_phase = metadata; wrong_phase.type = kind::state_ack;
+    refused([&] { decode(wrong_phase,{payload.data(),payload.size()}); });
+    refused([&] { decode_terminal_outcome(metadata,{payload.data(),payload.size()},result.step,result.certificate_digest,127,2,bounds); });
+    refused([&] { decode_terminal_outcome(metadata,{payload.data(),payload.size()},result.step,result.certificate_digest,128,8,bounds); });
+    for (int field = 0; field < 6; ++field) {
+        auto wrong = result;
+        if (field == 0) { wrong.mode = 2; }
+        if (field == 1) { wrong.top[1].token = wrong.top[0].token; }
+        if (field == 2) { wrong.top[1].logit = 2; }
+        if (field == 3) { wrong.top[1].logit = std::numeric_limits<float>::infinity(); }
+        if (field == 4) { wrong.top[1].logit = std::numeric_limits<float>::quiet_NaN(); }
+        if (field == 5) { wrong.top[1] = {4,wrong.top[0].logit}; }
+        refused([&] { encode_terminal_outcome(wrong,bounds); });
+    }
+}
+
 int main() {
     try {
         happy_and_expired(); malformed_requests(); conflicts(); certificate_barrier(); uncertain_reset(); reset_and_capacity();
         codec_golden(); codec_refusals(); authenticated_certificate();
         global_barrier_permutations(); global_barrier_refusals(); committed_ack_codec();
-        std::puts("GLM session control: twelve suites passed (owner lifecycle, codecs/authentication, distinct certificate-bound commit ACKs, all-three barrier, permutations, conflicts, uncertain reset/replay); model dispatch/reply publication NOT_IMPLEMENTED");
+        terminal_codec();
+        std::puts("GLM session control: thirteen suites passed (owner lifecycle, codecs/authentication, commit ACKs/barrier, reset/replay, compact greedy terminal outcomes); production dispatch/publication NOT_IMPLEMENTED");
         return 0;
     } catch (const std::exception & error) {
         std::fprintf(stderr, "GLM session ledger test failed: %s\n", error.what()); return 1;

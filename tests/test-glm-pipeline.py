@@ -224,6 +224,7 @@ def run(oracle: pathlib.Path, executable: pathlib.Path, *, streamed: bool = Fals
         if generation.returncode != 0 or "GLM pipeline oracle:" not in generation.stdout:
             raise RuntimeError(f"oracle generation failed: {generation.stdout[-2000:]} {generation.stderr[-4000:]}")
         requests = json.loads((data / "requests.json").read_text())
+
         if requests["microbatch"] != (1 if streamed else 32):
             raise RuntimeError("independent monolithic oracle used the wrong microbatch")
         ends = [2, 3, 6] if locked else [2, 4, 6]
@@ -334,6 +335,18 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path) -> None:
             raise RuntimeError(f"transaction oracle failed: {generated.stderr[-4000:]}")
         requests = json.loads((data / "requests.json").read_text())
 
+        def terminal_oracle() -> list[dict]:
+            logits = (data / "oracle-2.f32le").read_bytes()
+            output = []
+            position = 0
+            for rows in requests["chunks"]:
+                position += rows
+                row = logits[(position-1)*128*4:position*128*4]
+                scores = struct.unpack("<128f",row); bits = struct.unpack("<128I",row)
+                order = sorted(range(128),key=lambda token:(-scores[token],token))
+                output.append({"token":order[0],"logit_bits":bits[order[0]],"row":rows-1,
+                               "top":[[token,bits[token]] for token in order[:8]]})
+            return output
         def attempt(label: str, generation: int, drop_ack: bool, recover_once: bool = False, drop_chunk: int = 0) -> None:
             # New credential and session for each process group; never resume old connections.
             key_file = root / f"{label}-key.bin"
@@ -407,6 +420,8 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path) -> None:
                             record["full_residency_validated"] is False and len(record["certificates"]) == 7 and
                             len(set(record["certificates"])) == 7):
                         raise RuntimeError("worker transaction cursor/retry/certificate evidence differs")
+                    if record["terminal_results"] != ([] if worker.rank == 1 else terminal_oracle()) or record["terminal_payload_bytes"] != (0 if worker.rank == 1 else 8*272):
+                        raise RuntimeError("compact terminal greedy candidates differ from independent full-logit oracle or payload budget")
                     certificates.append(record["certificates"])
                     print(f"REPLY_CACHE_RANK {worker.rank}: payload peak {record['peak_reply_bytes']}; "
                           f"native page peak {record['peak_reply_page_bytes']}; seven immutable committed retries")
@@ -426,6 +441,7 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path) -> None:
                 print(f"THREE_PROCESS_TRANSACTIONS_PASS: {label}; seven all-owner commits/retries; 131 tokens; "
                       f"byte-exact boundaries/logits; max error {maximum:.9g}; full admission NOT_VALIDATED")
                 print("CONTROL_RECONNECT_RETRY_PASS: fresh handshakes/counters; duplicate boundary/commit served from immutable replies; no extra graph calls")
+                print("COMPACT_TERMINAL_PASS: native C greedy token/top eight match independent oracle; 272 bytes per result; retry outcome unchanged")
                 if recover_once:
                     print("RETAINED_WEIGHT_RESET_REPLAY_PASS: same three processes/owned models; two real contexts each; B source stays removed; newer epoch replays exact oracle")
                     if drop_chunk:

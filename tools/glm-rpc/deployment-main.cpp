@@ -1,12 +1,15 @@
 #include "stage-deployment.h"
 #include "stage-identity.h"
 #include "stage-model-facts.h"
+#include "stage-credential.h"
+#include "stage-locked-pages.h"
 #include "llama.h"
 
 #include <nlohmann/json.hpp>
 
 #include <cstdio>
 #include <iostream>
+#include <optional>
 
 static int run(const std::vector<std::string> & args) {
     llama_log_set([](ggml_log_level, const char *, void *) {},nullptr);
@@ -14,13 +17,14 @@ static int run(const std::vector<std::string> & args) {
         std::cout << "LlamaGLM deployment schema 1, source " << glm_rpc::compiled_source_revision() << '\n'; return 0;
     }
     if (args.size() == 2 && args[1] == "--help") {
-        std::cout << "Usage: llama-glm-config --check|--inspect deployment.json\n"
+        std::cout << "Usage: llama-glm-config --check|--inspect|--check-key deployment.json\n"
                      "       llama-glm-config --audit-headers deployment.json header1 header2 header3 header4\n"
                      "Validate syntax or exact bounded model headers; runtime admission is separate.\n"; return 0;
     }
     const bool audit = args.size() == 7 && args[1] == "--audit-headers";
     const bool inspect = args.size() == 3 && args[1] == "--inspect";
-    if (!audit && !inspect && (args.size() != 3 || args[1] != "--check")) {
+    const bool check_key = args.size() == 3 && args[1] == "--check-key";
+    if (!audit && !inspect && !check_key && (args.size() != 3 || args[1] != "--check")) {
         std::fprintf(stderr,"Usage: llama-glm-config --check|--inspect deployment.json; --help for reference header auditing\n"); return 2;
     }
     try {
@@ -38,6 +42,15 @@ static int run(const std::vector<std::string> & args) {
             {"row_limit",config.bounds.rows},{"frame_bytes",config.bounds.frame_bytes},{"layer_ends",config.layer_ends},
             {"local_model_files",config.model_files.size()},{"tensor_schema","NOT_RUN"},{"model_payload_bytes_read",0},
             {"credentials_read",false},{"network_operations",0},{"nodes",nodes}};
+        std::optional<glm_rpc::locked_secret> credential;
+        if (check_key) {
+            credential.emplace(config.secret_file,glm_stage::locked_pages::required_bytes(sizeof(glm_rpc::secret)));
+            credential->verify_locked();
+            report["credentials_read"] = true;
+            report["credential_private_access"] = "VALIDATED";
+            report["credential_locked_page_bytes"] = credential->locked_bytes();
+            report["credential_open_files"] = 0;
+        }
         if (inspect || audit) {
             glm_rpc::model_header_facts facts;
             if (audit) {

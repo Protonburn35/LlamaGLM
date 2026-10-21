@@ -2,7 +2,7 @@ add_library(llama-glm-storage STATIC stage-storage.cpp stage-locked-pages.cpp st
 target_include_directories(llama-glm-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(llama-glm-storage PUBLIC cxx_std_17)
 if (WIN32)
-    target_link_libraries(llama-glm-storage PRIVATE psapi)
+    target_link_libraries(llama-glm-storage PRIVATE psapi advapi32)
 endif()
 
 add_library(llama-glm-expert-bank STATIC stage-expert-bank.cpp)

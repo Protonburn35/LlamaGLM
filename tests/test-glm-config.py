@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check local deployment syntax/privacy without model, credential or network access."""
+"""Check deployment syntax/privacy and explicit private-key policy without tensor payloads."""
 
 import argparse
 import copy
@@ -10,6 +10,8 @@ import subprocess
 import struct
 import tempfile
 
+from glm_private_files import secure_directory, make_public_test_file
+
 
 def run(executable: pathlib.Path) -> None:
     example = pathlib.Path(__file__).resolve().parents[1] / "docs/config/deployment.example.json"
@@ -17,6 +19,7 @@ def run(executable: pathlib.Path) -> None:
     private = "NEVER-ECHO-THIS-PRIVATE-CONFIG-VALUE"
     initial["secret_file"] = f"credentials/{private}.bin"
     with tempfile.TemporaryDirectory(prefix="glm local config \u03bb ") as directory:
+        secure_directory(pathlib.Path(directory))
         path = pathlib.Path(directory) / "deployment.json"
 
         def invoke(value: dict | str, success: bool) -> dict | None:
@@ -116,10 +119,27 @@ def run(executable: pathlib.Path) -> None:
         inspected = subprocess.run([str(executable),"--inspect",str(path)],capture_output=True,text=True,timeout=5)
         if inspected.returncode != 1 or "source size differs" not in inspected.stderr or inspected.stdout:
             raise RuntimeError("full model size mismatch reached header parsing or passed inspection")
+        key_file = pathlib.Path(directory) / initial["secret_file"]
+        key_file.parent.mkdir(parents=True)
+        key_file.touch(mode=0o600,exist_ok=False)
+        key_file.write_bytes(bytes(range(1,33)))
+        checked = subprocess.run([str(executable),"--check-key",str(path)],capture_output=True,text=True,timeout=5)
+        if checked.returncode or private in checked.stdout+checked.stderr or str(key_file) in checked.stdout+checked.stderr:
+            raise RuntimeError("private-key inspection failed or exposed credential material/path")
+        report = json.loads(checked.stdout)
+        if not (report["credentials_read"] is True and report["credential_private_access"] == "VALIDATED" and
+                0 < report["credential_locked_page_bytes"] <= 65536 and report["credential_open_files"] == 0 and
+                report["admission"] == "NOT_VALIDATED" and report["tensor_schema"] == "NOT_RUN" and
+                report["model_payload_bytes_read"] == report["network_operations"] == 0):
+            raise RuntimeError("key inspection claimed model/resource admission or retained a file source")
+        make_public_test_file(key_file)
+        checked = subprocess.run([str(executable),"--check-key",str(path)],capture_output=True,text=True,timeout=5)
+        if checked.returncode != 1 or checked.stdout or private in checked.stderr:
+            raise RuntimeError("public key file passed or exposed private configuration")
         version = subprocess.run([str(executable), "--version"], capture_output=True, text=True, timeout=5)
         if version.returncode or "deployment schema 1" not in version.stdout:
             raise RuntimeError("deployment executable did not report its schema/source")
-        print("GLM_DEPLOYMENT_CONFIG_PASS: three owners/defaults, explicit capacities, 39 malformed/privacy refusals; no model/credential files or network operations; admission NOT_VALIDATED")
+        print("GLM_DEPLOYMENT_CONFIG_PASS: three owners/defaults, 39 malformed/privacy refusals, full-file refusals and explicit private/locked key inspection; check mode reads no model/credentials; admission NOT_VALIDATED")
 
 
 if __name__ == "__main__":

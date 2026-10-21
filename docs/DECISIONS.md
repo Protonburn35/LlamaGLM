@@ -99,3 +99,6 @@
 
 
 - Verify exact pinned metadata bytes before native header parsing, read only known bounded prefixes and retain native source ownership through checked facts. Keep local full-file size inspection distinct from explicit reference-only header auditing. Reuse the existing native schema/canonical identity and never promote metadata compatibility to payload integrity, a completed load or resource admission.
+
+
+- Load configured root credentials once from a private regular local source directly into native locked pages, check permissions on the opened handle before/after the read and close the reader before publishing the owner. Keep borrowed keys stable for joined readers, wipe before unlock and never expose bytes/fingerprints or defaults. Apply the provider to actual fixture authentication/recovery while keeping protocol/crypto copies and full admission explicitly open.

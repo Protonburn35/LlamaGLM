@@ -1,6 +1,7 @@
 #include "stage-storage.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <cstring>
@@ -13,6 +14,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <aclapi.h>
 #else
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -92,6 +94,73 @@ uint64_t expert_file::size() const {
 file_read_stats expert_file::stats() const {
     if (!state) { throw std::runtime_error("GLM expert file was moved"); }
     return {state->requests.load(), state->system_reads.load(), state->transferred.load()};
+}
+
+void expert_file::require_private_access() const {
+    if (!state || state->failed.load()) { throw std::runtime_error("GLM source is invalid for private access validation"); }
+    try {
+#ifdef _WIN32
+        struct token_owner {
+            HANDLE value = nullptr;
+            ~token_owner() { if (value) { CloseHandle(value); } }
+        } token;
+        if (!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token.value)) {
+            throw std::runtime_error("cannot query the private source principal");
+        }
+        DWORD bytes = 0;
+        GetTokenInformation(token.value,TokenUser,nullptr,0,&bytes);
+        if (!bytes || bytes > 65536) { throw std::runtime_error("invalid private source token size"); }
+        std::vector<uint8_t> user(bytes);
+        if (!GetTokenInformation(token.value,TokenUser,user.data(),bytes,&bytes)) {
+            throw std::runtime_error("cannot read the private source principal");
+        }
+        const auto current = reinterpret_cast<const TOKEN_USER *>(user.data())->User.Sid;
+        alignas(DWORD) std::array<uint8_t,SECURITY_MAX_SID_SIZE> system{}, admins{};
+        DWORD system_bytes = DWORD(system.size()), admin_bytes = DWORD(admins.size());
+        if (!CreateWellKnownSid(WinLocalSystemSid,nullptr,system.data(),&system_bytes) ||
+                !CreateWellKnownSid(WinBuiltinAdministratorsSid,nullptr,admins.data(),&admin_bytes)) {
+            throw std::runtime_error("cannot construct trusted private source principals");
+        }
+        struct descriptor_owner {
+            PSECURITY_DESCRIPTOR value = nullptr;
+            ~descriptor_owner() { if (value) { LocalFree(value); } }
+        } descriptor;
+        PSID owner = nullptr; PACL acl = nullptr;
+        if (GetSecurityInfo(state->file,SE_FILE_OBJECT,OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION,
+                &owner,nullptr,&acl,nullptr,&descriptor.value) != ERROR_SUCCESS || !acl || !IsValidAcl(acl)) {
+            throw std::runtime_error("cannot validate the private source access list");
+        }
+        const auto trusted = [&](PSID sid) {
+            return sid && IsValidSid(sid) && (EqualSid(sid,current) || EqualSid(sid,system.data()) || EqualSid(sid,admins.data()));
+        };
+        if (!trusted(owner)) { throw std::invalid_argument("private source owner is not trusted"); }
+        for (DWORD i = 0; i < acl->AceCount; ++i) {
+            void * raw = nullptr;
+            if (!GetAce(acl,i,&raw)) { throw std::runtime_error("cannot read a private source access entry"); }
+            const auto * head = static_cast<const ACE_HEADER *>(raw);
+            if (head->AceFlags & INHERIT_ONLY_ACE) { continue; }
+            if (head->AceType == ACCESS_DENIED_ACE_TYPE || head->AceType == ACCESS_DENIED_OBJECT_ACE_TYPE ||
+                    head->AceType == ACCESS_DENIED_CALLBACK_ACE_TYPE || head->AceType == ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE) { continue; }
+            if (head->AceType != ACCESS_ALLOWED_ACE_TYPE || head->AceSize < sizeof(ACCESS_ALLOWED_ACE)+4) {
+                throw std::invalid_argument("unsupported private source access entry");
+            }
+            const auto * entry = static_cast<const ACCESS_ALLOWED_ACE *>(raw);
+            const auto * sid_bytes = reinterpret_cast<const uint8_t *>(&entry->SidStart);
+            if (sid_bytes[1] > SID_MAX_SUB_AUTHORITIES || head->AceSize-sizeof(ACE_HEADER)-sizeof(ACCESS_MASK) < 8u+4u*sid_bytes[1]) {
+                throw std::invalid_argument("invalid private source principal length");
+            }
+            const auto sid = reinterpret_cast<PSID>(const_cast<DWORD *>(&entry->SidStart));
+            if (!trusted(sid)) { throw std::invalid_argument("private source grants access to another principal"); }
+        }
+#else
+        state->check_identity();
+        struct stat current{};
+        if (fstat(state->file,&current) != 0) { throw std::runtime_error("cannot query private source permissions"); }
+        if ((current.st_uid != geteuid() && current.st_uid != 0) || (current.st_mode & 0077)) {
+            throw std::invalid_argument("private source requires trusted ownership and owner-only permissions");
+        }
+#endif
+    } catch (...) { state->failed.store(true); throw; }
 }
 
 void expert_file::read_exact(uint64_t offset, uint8_t * output, size_t bytes) const {

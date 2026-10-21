@@ -16,6 +16,7 @@ Full laptop residency/admission is **NOT_VALIDATED**. Experimental preload polic
 | Authenticated wire frames and reassembled activations | B fixture receives directly into one fixed verified native-locked activation buffer; outgoing frames write original immutable payloads without a packet copy | Control/crypto/header/kernel storage, aggregate budget, production peer/queue quotas and native qualification |
 | CUDA transfer staging | Ordinary backend/driver behavior; OS-locked payloads are not CUDA DMA registration | Explicit bounded transfer storage, lifetimes and admission |
 | GPU allocations and Windows/WDDM resources | Logical backend bank counters and configured limits only | Actual devices, measured available/reserved resources and residency validation |
+| Configured PSK root | Startup-only private native file access, one dedicated verified locked page, source closed before use; quiescent wipe and no fallback | Protocol/derived key copies, crypto allocations, owner metadata and aggregate admission |
 | OS, other processes and operating reserve | No complete physical admission | Capacity probes, explicit reserve and fail-before-READY policy |
 
 The host report verifies only tracked native payload pages, between decodes and allocation/free operations. Its full_residency_validated field remains zero. Its tensor buffer/byte counters also include configured CPU work buffers. No production negotiation should infer full admission from these counters, source/header identity or successful hosted compilation.

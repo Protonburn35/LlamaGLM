@@ -15,6 +15,8 @@ import subprocess
 import tempfile
 import threading
 
+from glm_private_files import secure_directory
+
 
 class Worker:
     def __init__(self, executable: pathlib.Path, data: pathlib.Path, key_file: pathlib.Path, output: pathlib.Path,
@@ -225,6 +227,11 @@ def check_io(workers: list[Worker], transactional: bool = False, generation: int
     controls = {0: [(0,0),(acknowledgements,decisions),(terminal,decisions)],
                 1: [(decisions,acknowledgements),(0,0),(0,0)], 2: [(decisions,terminal),(0,0),(0,0)]}
     for worker in workers:
+        credentials = [json.loads(line.removeprefix("GLM_PIPELINE_CREDENTIAL ")) for line in worker.lines
+                       if line.startswith("GLM_PIPELINE_CREDENTIAL ")]
+        if len(credentials) != 1 or credentials[0] != {"rank":worker.rank,"locked_page_bytes":4096,
+                "private_access_validated":True,"open_source_files":0,"full_residency_validated":False}:
+            raise RuntimeError("worker did not use its startup-only private native-locked credential")
         records = [json.loads(line.removeprefix("GLM_PIPELINE_IO ")) for line in worker.lines
                    if line.startswith("GLM_PIPELINE_IO ")]
         if len(records) != 1:
@@ -266,6 +273,7 @@ def run(oracle: pathlib.Path, executable: pathlib.Path, *, streamed: bool = Fals
     streamed = streamed or locked
     with tempfile.TemporaryDirectory(prefix="glm three process fixture ") as directory:
         root = pathlib.Path(directory)
+        secure_directory(root)
         data = root / "oracle and model"
         command = [str(oracle), "--glm-pipeline-fixture", str(data), "--seed", "53"]
         if locked:
@@ -382,6 +390,7 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path, *, greedy: 
     """Exercise real graph commits, lost B ACK and process-restart replay with fresh keys."""
     with tempfile.TemporaryDirectory(prefix="glm transaction fixture ") as directory:
         root = pathlib.Path(directory)
+        secure_directory(root)
         data = root / "independent oracle"
         command = [str(oracle), "--glm-pipeline-fixture", str(data), "--glm-pipeline-locked", "--seed", "53"]
         if sampled:

@@ -14,6 +14,7 @@
 #include "stage-sampling.h"
 #include "stage-sampling-codec.h"
 #include "stage-locked-pages.h"
+#include "stage-credential.h"
 #include "glm-fixture-lock-quota.h"
 
 #include <nlohmann/json.hpp>
@@ -408,16 +409,12 @@ int main(int argc, char ** argv) {
         require(rank == 2 ? next_port == 0 : next_port != 0, "fixture next peer is missing");
         require(!std::filesystem::exists(args.at("--output")) && !std::filesystem::is_symlink(args.at("--output")),
                 "fixture worker output must not already exist");
-        struct key_file {
-            secret value{};
-            ~key_file() { erase_secret(value); }
-        } credential;
-        auto & psk = credential.value;
-        require(std::filesystem::file_size(args.at("--key-file")) == psk.size(), "fixture key file must contain exactly 32 bytes");
-        std::ifstream key_input(args.at("--key-file"), std::ios::binary);
-        key_input.read(reinterpret_cast<char *>(psk.data()), psk.size());
-        require(bool(key_input), "cannot read configured fixture key");
-        key_input.close();
+        locked_secret credential(args.at("--key-file"),glm_stage::locked_pages::required_bytes(sizeof(secret)));
+        credential.verify_locked();
+        const auto & psk = credential.value();
+        const json key_evidence{{"rank",rank},{"locked_page_bytes",credential.locked_bytes()},
+            {"private_access_validated",true},{"open_source_files",0},{"full_residency_validated",false}};
+        std::printf("GLM_PIPELINE_CREDENTIAL %s\n",key_evidence.dump().c_str()); std::fflush(stdout);
 
         auto params = llama_model_default_params();
         ggml_backend_dev_t cpu_only[] = {nullptr};
@@ -553,7 +550,7 @@ int main(int argc, char ** argv) {
             std::printf("GLM_PIPELINE_OWNED %u %u %u %llu\n", rank, rank ? ends[rank-1] : 0, ends[rank],
                     static_cast<unsigned long long>(llama_model_size(model.get())));
             std::fflush(stdout);
-            if (!transactional) { erase_secret(psk); }
+            if (!transactional) { credential.invalidate(); }
             std::optional<owner_transactions> ledger;
             std::optional<reply_cache> replies;
             std::optional<sampling_transactions> sampler;
@@ -723,7 +720,7 @@ int main(int argc, char ** argv) {
                 }
                 throw;
             }
-            erase_secret(psk);
+            credential.invalidate();
             output.close();
             require(bool(output), "cannot seal fixture worker output");
             report_storage("complete");

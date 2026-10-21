@@ -36,6 +36,9 @@ public:
     uint64_t size() const;
     void read_exact(uint64_t offset, uint8_t * output, size_t bytes) const;
     file_read_stats stats() const;
+    // Optional credential policy on the already opened handle. Current user/System/admin
+    // ownership only; no other principal may have an allow ACE (POSIX mode must be owner-only).
+    void require_private_access() const;
 
 private:
     struct impl;

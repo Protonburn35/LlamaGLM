@@ -27,3 +27,6 @@ Production resource admission, protected configuration/control ownership, creden
 
 
 Native Windows syntax/Unicode qualification passes at 11963acff, run 39594391976, in CPU/SM89/SM120a hosted builds with fifteen CTest/seven GLM/native schema gates. A later extension adds separate bounded model-header inspection/reference auditing; check mode retains its original zero-model-access contract. See MODEL_HEADER_FACTS.md.
+
+
+An additional explicit --check-key operation now loads the configured raw 32-byte nonzero key under a private native-file policy and verifies dedicated locked pages, with no model/network work. Ordinary check/header modes remain credential-unread and all modes keep admission false. No production key or permission is generated/changed by the tool. See CREDENTIAL_PROVISIONING.md.

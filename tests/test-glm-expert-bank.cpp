@@ -112,10 +112,11 @@ static void compare_operations(ggml_backend_t backend, const std::array<ggml_ten
     require(std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) != 0, "scale fixture does not distinguish original IDs from cache slots");
 }
 
-static void native_quant_case(ggml_backend_t backend, const std::array<ggml_type, 3> & types) {
+static void native_quant_case(ggml_backend_t backend, const std::array<ggml_type, 3> & types, uint32_t slots = 8) {
     fixture f(types);
     desktop_experts source(0, {f.file}, f.catalog(), f.selected_bytes, 24);
-    expert_bank bank(backend, 8, f.specs, 1u << 20, [&](auto address) { return source.acquire(address); });
+    uint64_t acquisitions = 0;
+    expert_bank bank(backend, slots, f.specs, 2u << 20, [&](auto address) { ++acquisitions; return source.acquire(address); });
     ggml_context_ptr metadata(ggml_init({3 * ggml_tensor_overhead(), nullptr, true}));
     std::array<ggml_tensor *, 3> reference;
     for (size_t p = 0; p < reference.size(); ++p) { reference[p] = ggml_new_tensor_3d(metadata.get(), types[p], width, output_width, expert_count); }
@@ -127,8 +128,12 @@ static void native_quant_case(ggml_backend_t backend, const std::array<ggml_type
     for (int64_t t = 0; t < tokens; ++t) {
         for (int64_t k = 0; k < selected_count; ++k) { selected.push_back(odd[size_t((k + t) % selected_count)]); }
     }
-    for (int phase = 0; phase < 3; ++phase) {
+    for (int phase = 0; phase < 6; ++phase) {
+        if (phase == 1 || phase == 4) { std::rotate(selected.begin(), selected.begin() + 1, selected.end()); }
         if (phase == 2) { for (auto & id : selected) { --id; } }
+        if (phase == 3) { for (auto & id : selected) { if (id == 2) { id = 3; } } }
+        if (phase == 5) { for (size_t i = 0; i < selected.size(); ++i) { selected[i] = odd[i % odd.size()]; } }
+        const auto before = bank.stats();
         auto lease = bank.materialize(selected);
         refused([&] { bank.materialize(selected); });
         auto competing = std::async(std::launch::async, [&] { refused([&] { bank.materialize(selected); }); });
@@ -136,12 +141,21 @@ static void native_quant_case(ggml_backend_t backend, const std::array<ggml_type
         auto moved = std::move(lease);
         refused([&] { lease.projection(0); });
         compare_operations(backend, reference, moved, selected);
+        const auto after = bank.stats();
+        const uint64_t expected_misses = phase == 0 || phase == 2 ? 8 : phase == 3 ? 1 : phase == 5 ? (slots == 12 ? 4 : 7) : 0;
+        require(after.materializations == uint64_t(phase + 1) && after.failures == 0 &&
+                after.slot_misses - before.slot_misses == expected_misses && after.slot_hits - before.slot_hits == 8 - expected_misses &&
+                after.copied_slabs - before.copied_slabs == 3 * expected_misses && after.copied_slabs == acquisitions,
+                "backend expert reuse/LRU copied hot experts, lost selected slots or reported incorrect counters");
+        if (expected_misses == 0) { require(after.copied_bytes == before.copied_bytes, "hot bank selection copied backend bytes"); }
         if (phase == 0) { require(f.file->stats().requests == 24, "first bank fill did not read all eight experts of all three projections"); }
         if (phase == 1) { require(f.file->stats().requests == 24, "hot bank fill reread source files"); }
         if (phase == 2) { require(f.file->stats().requests == 48, "cold replacement did not fetch the complete new expert set"); }
+        if (phase == 3 || phase == 4) { require(f.file->stats().requests == 51, "partial/hot replacement fetched unchanged backend experts"); }
+        if (phase == 5) { require(f.file->stats().requests == (slots == 12 ? 63 : 72), "returning experts did not follow retained backend slots"); }
     }
-    std::printf("GLM expert bank: %s/%s/%s native CPU outputs byte-exact across cold/hot/evict phases\n",
-                ggml_type_name(types[0]), ggml_type_name(types[1]), ggml_type_name(types[2]));
+    std::printf("GLM expert bank: %s/%s/%s, %u slots, native CPU outputs byte-exact across cold/hot/partial/LRU phases; hot copies zero\n",
+                ggml_type_name(types[0]), ggml_type_name(types[1]), ggml_type_name(types[2]), slots);
 }
 
 static void failure_cases(ggml_backend_t backend) {
@@ -177,6 +191,20 @@ static void failure_cases(ggml_backend_t backend) {
     refused([&] { broken.materialize({0,1,2,3,4,5,6,7}); });
     refused([&] { broken.materialize({0,1,2,3,4,5,6,7}); });
     require(calls == 3, "partly failed bank was reused");
+    size_t replacement_calls = 0;
+    bool fail_replacement = false;
+    expert_bank replacing(backend, 8, f.specs, 1u << 20, [&](expert_address address) -> expert_lease {
+        ++replacement_calls;
+        if (fail_replacement && replacement_calls == 26) { return std::make_shared<const std::vector<uint8_t>>(1); }
+        return memory.acquire(address);
+    });
+    { auto first = replacing.materialize({0,1,2,3,4,5,6,7}); }
+    fail_replacement = true;
+    refused([&] { replacing.materialize({1,2,3,4,5,6,7,8}); });
+    refused([&] { replacing.materialize({0,1,2,3,4,5,6,7}); });
+    const auto stats = replacing.stats();
+    require(replacement_calls == 26 && stats.materializations == 1 && stats.copied_slabs == 25 && stats.failures == 2,
+            "partly failed hot-bank replacement exposed/reused old slot mappings or lost completed-copy accounting");
 }
 
 int main() {
@@ -188,8 +216,9 @@ int main() {
         native_quant_case(backend.get(), {GGML_TYPE_Q6_K, GGML_TYPE_Q8_0, GGML_TYPE_IQ3_S});
         native_quant_case(backend.get(), {GGML_TYPE_IQ2_S, GGML_TYPE_IQ4_XS, GGML_TYPE_Q3_K});
         native_quant_case(backend.get(), {GGML_TYPE_Q2_K, GGML_TYPE_IQ3_S, GGML_TYPE_IQ2_S});
+        native_quant_case(backend.get(), {GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32}, 12);
         failure_cases(backend.get());
-        std::puts("GLM expert bank: five suites passed; all eight publisher types, eight selected experts, original scale IDs and failure refusal");
+        std::puts("GLM expert bank: six suites passed; all eight publisher types, eight selected experts, backend reuse/LRU, original scale IDs and failure refusal");
         ggml_quantize_free();
         return 0;
     } catch (const std::exception & error) {

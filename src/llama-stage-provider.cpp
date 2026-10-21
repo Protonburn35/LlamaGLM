@@ -38,6 +38,7 @@ struct stage_weight_source;
 struct stage_context_experts final : llama_stage_context_experts {
     struct layer_context {
         stage_context_experts * owner;
+        bool cpu;
         std::unique_ptr<glm_stage::expert_bank> bank;
         std::optional<glm_stage::expert_bank::lease> active;
     };
@@ -56,6 +57,22 @@ struct stage_context_experts final : llama_stage_context_experts {
         return weight.first->bank->projection_for_graph(weight.second);
     }
     bool failed() const override { return invalid.load(); }
+    void report(llama_stage_bank_report & output) const override {
+        const auto add = [](uint64_t & total, uint64_t value) {
+            if (value > std::numeric_limits<uint64_t>::max() - total) { throw std::overflow_error("stage bank counter overflow"); }
+            total += value;
+        };
+        for (const auto & entry : layers) {
+            const auto & layer = *entry.second;
+            if (layer.cpu) { ++output.cpu_banks; } else { ++output.device_banks; }
+            const auto stats = layer.bank->stats();
+            add(output.buffer_bytes, layer.bank->buffer_bytes());
+            add(output.materializations, stats.materializations);
+            add(output.slot_hits, stats.slot_hits); add(output.slot_misses, stats.slot_misses);
+            add(output.copied_slabs, stats.copied_slabs); add(output.copied_bytes, stats.copied_bytes);
+            add(output.failures, stats.failures);
+        }
+    }
     std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const override { return buffers; }
     std::string error() const override {
         std::lock_guard<std::mutex> lock(error_mutex);
@@ -200,6 +217,7 @@ stage_context_experts::stage_context_experts(std::shared_ptr<stage_weight_source
         if (!backend) { throw std::runtime_error("owned streamed layer has no matching execution backend"); }
         auto layer = std::make_unique<layer_context>();
         layer->owner = this;
+        layer->cpu = ggml_backend_dev_type(ggml_backend_get_device(backend)) == GGML_BACKEND_DEVICE_TYPE_CPU;
         const auto cache = this->source->cache;
         const auto & specs = registered.second.specs;
         layer->bank = std::make_unique<glm_stage::expert_bank>(backend, this->source->params.bank_slots,

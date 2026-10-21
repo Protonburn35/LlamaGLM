@@ -235,6 +235,18 @@ int main(int argc, char ** argv) {
         output.close();
         require(bool(output), "cannot seal fixture worker output");
         report_storage("complete");
+        llama_stage_bank_report bank{}; bank.version = 1;
+        require(llama_context_stage_bank_report(context.get(), &bank) == desktop_source, "wrong fixture bank report source");
+        if (desktop_source) {
+            require(bank.device_banks == 0 && bank.cpu_banks == (rank == 0 ? 1 : 2) && bank.buffer_bytes <= storage.context_bank_bytes &&
+                    bank.materializations == uint64_t(bank.cpu_banks) * 131 && bank.slot_hits > 0 && bank.failures == 0 &&
+                    bank.slot_hits + bank.slot_misses == bank.materializations * 8 && bank.copied_slabs == bank.slot_misses * 3,
+                    "streamed worker did not reuse complete backend expert groups or reported inconsistent counters");
+            const json evidence{{"rank",rank}, {"cpu_banks",bank.cpu_banks}, {"device_banks",bank.device_banks},
+                {"buffer_bytes",bank.buffer_bytes}, {"materializations",bank.materializations}, {"hits",bank.slot_hits},
+                {"misses",bank.slot_misses}, {"copied_slabs",bank.copied_slabs}, {"copied_bytes",bank.copied_bytes}, {"failures",bank.failures}};
+            std::printf("GLM_PIPELINE_BANK %s\n", evidence.dump().c_str());
+        }
         std::printf("GLM_PIPELINE_DONE %u 131\n", rank);
         std::fflush(stdout);
         common_log_flush(common_log_main());

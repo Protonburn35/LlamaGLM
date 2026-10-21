@@ -911,6 +911,12 @@ const llama_model & llama_context::get_model() const {
     return model;
 }
 
+bool llama_context::stage_bank_report(llama_stage_bank_report & output) const {
+    if (!stage_experts) { return false; }
+    stage_experts->report(output);
+    return true;
+}
+
 const llama_cparams & llama_context::get_cparams() const {
     return cparams;
 }
@@ -4285,6 +4291,14 @@ uint32_t llama_n_rs_seq(const llama_context * ctx) {
 
 const llama_model * llama_get_model(const llama_context * ctx) {
     return &ctx->get_model();
+}
+
+bool llama_context_stage_bank_report(const llama_context * ctx, llama_stage_bank_report * report) {
+    if (!report || report->version != 1) { return false; }
+    *report = {}; report->version = 1;
+    if (!ctx) { return false; }
+    try { return ctx->stage_bank_report(*report); }
+    catch (...) { *report = {}; report->version = 1; return false; }
 }
 
 enum llama_pooling_type llama_pooling_type(const llama_context * ctx) {

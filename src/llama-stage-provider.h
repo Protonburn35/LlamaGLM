@@ -19,6 +19,7 @@ struct llama_stage_context_experts {
     virtual ggml_tensor * build_slots(ggml_context * ctx, ggml_tensor * selected, int layer) = 0;
     virtual bool failed() const = 0;
     virtual std::string error() const = 0;
+    virtual void report(llama_stage_bank_report & output) const = 0;
     virtual std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const = 0;
 };
 

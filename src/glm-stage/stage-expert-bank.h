@@ -14,8 +14,17 @@ struct expert_projection {
     std::vector<expert_address> experts;
 };
 
+struct expert_bank_stats {
+    uint64_t materializations = 0;
+    uint64_t slot_hits = 0;       // distinct complete expert groups reused
+    uint64_t slot_misses = 0;     // distinct complete expert groups filled
+    uint64_t copied_slabs = 0;    // completed per-projection copies, including failed prefixes
+    uint64_t copied_bytes = 0;
+    uint64_t failures = 0;
+};
+
 // Three raw gate/up/down banks with bounded slots. Backend must outlive the bank and all leases.
-// This is a materialization primitive, not a model callback or an admission/residency decision.
+// Source/catalog bytes must be immutable. This does not establish physical residency or admission.
 class expert_bank {
     struct impl;
 public:
@@ -40,6 +49,7 @@ public:
     expert_bank(const expert_bank &) = delete;
     expert_bank & operator=(const expert_bank &) = delete;
     uint64_t buffer_bytes() const;
+    expert_bank_stats stats() const;
     static bool supports_type(ggml_type type);
     // Metadata for graph construction; execution must depend on materialization and retain its lease.
     ggml_tensor * projection_for_graph(size_t index) const;

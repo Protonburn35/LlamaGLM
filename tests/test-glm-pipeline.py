@@ -100,6 +100,20 @@ def check_storage(worker: Worker, streamed: bool, logical_bytes: int) -> None:
     if len(records) != 2 or [record["phase"] for record in records] != ["startup", "complete"]:
         raise RuntimeError("worker storage evidence is missing or out of order")
     desktop = streamed and worker.rank != 1
+    banks = [json.loads(line.removeprefix("GLM_PIPELINE_BANK ")) for line in worker.lines
+             if line.startswith("GLM_PIPELINE_BANK ")]
+    if len(banks) != (1 if desktop else 0):
+        raise RuntimeError("worker bank reuse evidence is missing or has the wrong provider")
+    if desktop:
+        bank = banks[0]
+        layers = 1 if worker.rank == 0 else 2
+        if not (bank["rank"] == worker.rank and bank["cpu_banks"] == layers and bank["device_banks"] == 0 and
+                0 < bank["buffer_bytes"] <= 16 << 20 and bank["materializations"] == layers * 131 and
+                bank["hits"] > 0 and bank["misses"] > 0 and bank["hits"] + bank["misses"] == layers * 131 * 8 and
+                bank["copied_slabs"] == bank["misses"] * 3 and bank["copied_bytes"] > 0 and bank["failures"] == 0):
+            raise RuntimeError("worker backend slot/copy counters do not prove complete hot expert reuse")
+        print(f"BACKEND_BANK_RANK {worker.rank}: CPU hits {bank['hits']}; misses {bank['misses']}; "
+              f"copied slabs {bank['copied_slabs']}; copied bytes {bank['copied_bytes']}; device execution NOT_RUN")
     for record in records:
         if (record["version"], record["rank"], record["microbatch"], record["mode"]) != (
                 1, worker.rank, 1 if streamed else 32, "desktop-streamed" if desktop else "buffered"):

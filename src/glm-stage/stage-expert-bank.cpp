@@ -3,7 +3,9 @@
 #include "ggml-cpp.h"
 
 #include <array>
+#include <algorithm>
 #include <atomic>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -26,6 +28,10 @@ struct expert_bank::impl {
     std::function<expert_lease(expert_address)> source;
     std::atomic<bool> in_use{false};
     bool failed = false;
+    std::vector<int32_t> resident;
+    std::vector<uint64_t> last_used;
+    uint64_t clock = 0;
+    std::atomic<uint64_t> materializations{0}, slot_hits{0}, slot_misses{0}, copied_slabs{0}, copied_bytes{0}, failures{0};
     ggml_context_ptr context;
     std::array<ggml_tensor *, 3> banks{};
     ggml_backend_buffer_ptr buffer;
@@ -40,6 +46,8 @@ struct expert_bank::impl {
             throw std::invalid_argument("expert bank cannot replace or invent model experts");
         }
         experts = uint32_t(projections.front().experts.size());
+        resident.assign(slots, -1);
+        last_used.assign(slots, 0);
         context.reset(ggml_init({3 * ggml_tensor_overhead(), nullptr, true}));
         if (!context) { throw std::runtime_error("cannot allocate expert bank tensor metadata"); }
         uint64_t logical = 0;
@@ -80,6 +88,10 @@ expert_bank::expert_bank(ggml_backend_t backend, uint32_t slots, const std::vect
     state(std::make_shared<impl>(backend, slots, specs, budget, std::move(source))) {}
 
 uint64_t expert_bank::buffer_bytes() const { return ggml_backend_buffer_get_size(state->buffer.get()); }
+expert_bank_stats expert_bank::stats() const {
+    return {state->materializations.load(), state->slot_hits.load(), state->slot_misses.load(),
+        state->copied_slabs.load(), state->copied_bytes.load(), state->failures.load()};
+}
 bool expert_bank::supports_type(ggml_type type) { return bank_type(type); }
 ggml_tensor * expert_bank::projection_for_graph(size_t index) const {
     if (index >= state->banks.size()) { throw std::invalid_argument("invalid expert bank projection"); }
@@ -117,24 +129,52 @@ expert_bank::lease expert_bank::materialize(const std::vector<int32_t> & selecte
             if (id < 0 || uint32_t(id) >= state->experts) { throw std::invalid_argument("selected expert ID is outside the model"); }
             if (mapping[id] < 0) {
                 if (unique.size() == state->slots) { throw std::invalid_argument("distinct selected experts exceed the bank; no experts were clipped"); }
-                mapping[id] = int32_t(unique.size());
+                mapping[id] = 0;
                 unique.push_back(id);
             }
-            remapped.push_back(mapping[id]);
         }
+        mapping.fill(-1);
+        std::array<bool, 512> keep{};
+        std::vector<int32_t> cold;
+        uint64_t hits = 0;
+        for (const auto id : unique) {
+            for (uint32_t slot = 0; slot < state->slots; ++slot) {
+                if (state->resident[slot] == id) { mapping[id] = slot; keep[slot] = true; ++hits; break; }
+            }
+        }
+        for (const auto id : unique) {
+            if (mapping[id] >= 0) { continue; }
+            uint32_t victim = state->slots;
+            for (uint32_t slot = 0; slot < state->slots; ++slot) {
+                if (!keep[slot] && (victim == state->slots || state->last_used[slot] < state->last_used[victim])) { victim = slot; }
+            }
+            if (victim == state->slots) { throw std::runtime_error("expert bank cannot reserve all selected slots"); }
+            keep[victim] = true;
+            mapping[id] = victim;
+            cold.push_back(id);
+        }
+        for (const auto id : selected) { remapped.push_back(mapping[id]); }
         ggml_backend_synchronize(state->backend);
         for (size_t projection = 0; projection < state->specs.size(); ++projection) {
             const auto & spec = state->specs[projection];
-            for (size_t slot = 0; slot < unique.size(); ++slot) {
-                const auto & address = spec.experts[unique[slot]];
+            for (const auto id : cold) {
+                const auto & address = spec.experts[id];
                 const auto data = state->source(address);
                 if (!data || data->size() != address.bytes) { throw std::runtime_error("expert source returned a missing or incorrectly sized slab"); }
                 // tensor_set completes its host/device copy before this raw-source lease is released.
-                ggml_backend_tensor_set(state->banks[projection], data->data(), slot * size_t(address.bytes), data->size());
+                ggml_backend_tensor_set(state->banks[projection], data->data(), size_t(mapping[id]) * size_t(address.bytes), data->size());
+                ++state->copied_slabs;
+                state->copied_bytes += data->size();
             }
         }
+        if (state->clock == std::numeric_limits<uint64_t>::max()) { std::fill(state->last_used.begin(), state->last_used.end(), 0); state->clock = 0; }
+        ++state->clock;
+        for (const auto id : unique) { state->resident[mapping[id]] = id; state->last_used[mapping[id]] = state->clock; }
+        ++state->materializations;
+        state->slot_hits += hits;
+        state->slot_misses += cold.size();
         return lease(state, std::move(remapped));
-    } catch (...) { state->failed = true; state->in_use.store(false); throw; }
+    } catch (...) { ++state->failures; state->failed = true; state->in_use.store(false); throw; }
 }
 
 } // namespace glm_stage

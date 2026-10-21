@@ -36,6 +36,23 @@ struct llama_stage_storage_report {
 
 LLAMA_API bool llama_model_stage_storage_report(const struct llama_model * model, struct llama_stage_storage_report * report);
 
+struct llama_stage_bank_report {
+    uint32_t version; // caller initializes to 1; inspect between decodes
+    uint32_t cpu_banks;
+    uint32_t device_banks;
+    uint32_t reserved;
+    uint64_t buffer_bytes;
+    uint64_t materializations;
+    uint64_t slot_hits;   // distinct expert groups in successful materializations
+    uint64_t slot_misses;
+    uint64_t copied_slabs;
+    uint64_t copied_bytes;
+    uint64_t failures;
+};
+
+// Backend slot/copy counters, not physical GPU residency or admission.
+LLAMA_API bool llama_context_stage_bank_report(const struct llama_context * ctx, struct llama_stage_bank_report * report);
+
 struct llama_stage_schema_report {
     uint32_t version; // caller must initialize to 1
     uint32_t tensors;

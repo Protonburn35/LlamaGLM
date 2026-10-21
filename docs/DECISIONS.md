@@ -30,3 +30,5 @@
 - Receive a complete locally planned activation chunk before mutating model state. Authenticate every bounded fragment, require exact semantic coordinates and increasing fragment indices, cap the single input buffer by a local reservation, and permanently interrupt/discard on any error. Keep whole-chunk transport completion distinct from distributed model commit/reset.
 
 - Start SSD work with read-only explicit-offset handles, no shared seek cursor or mmap, exact bounded byte transfers and source-mutation refusal. Keep the sealed memory expert store free of file handles/callbacks; a selected-expert miss fails. Do not equate a sealed heap catalog with Windows page locking or final laptop residency.
+
+- Keep desktop raw-expert caching restricted to ranks 0/2 and the complete locally checked owned catalog. Deduplicate loads and evict only unleased LRU entries. Track payload reservations through final buffer deletion, including weak-lock races and data retained past cache ownership; do not free budget merely because a map entry was evicted. Fatal load failure stops new cache work. This does not change routing or create a laptop fallback.

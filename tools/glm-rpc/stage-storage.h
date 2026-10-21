@@ -66,4 +66,30 @@ private:
     std::map<expert_address, expert_lease> entries;
 };
 
+struct expert_cache_stats {
+    uint64_t hits, misses, deduplicated, evictions, failures, refusals;
+    uint64_t reserved_payload_bytes, peak_reserved_payload_bytes;
+    size_t reserved_entries, active_reads;
+};
+
+// Desktop ranks 0/2 only. Bounded synchronous cold reads, deduplication and unleased LRU eviction.
+// Hold returned leases until CPU/GPU copies finish. Payload reservations survive retained/weak leases.
+// stop() wakes waiters; native disk reads still complete synchronously. Join users before destruction.
+class desktop_experts {
+public:
+    desktop_experts(uint32_t rank, std::vector<std::shared_ptr<expert_file>> sources,
+                    const std::vector<expert_address> & complete_owned_catalog,
+                    uint64_t byte_budget, size_t entry_budget, size_t max_active_reads = 2);
+    ~desktop_experts();
+    desktop_experts(const desktop_experts &) = delete;
+    desktop_experts & operator=(const desktop_experts &) = delete;
+    expert_lease acquire(expert_address address);
+    void stop();
+    expert_cache_stats stats() const;
+
+private:
+    struct impl;
+    std::unique_ptr<impl> state;
+};
+
 } // namespace glm_stage

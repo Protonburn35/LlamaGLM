@@ -348,7 +348,12 @@ int main(int argc, char ** argv) {
         require(std::filesystem::file_size(request_path) <= 16384, "fixture requests exceed limit");
         std::ifstream requests_file(request_path);
         const auto requests = json::parse(requests_file);
-        const std::vector<uint32_t> expected_chunks{1,3,4,17,31,64,11};
+        const bool greedy = requests.contains("generation_mode");
+        require(!greedy || (transactional && requests.at("generation_mode") == "greedy" && requests.at("prompt_rows") == 17),
+                "greedy feedback requires the transactional prompt profile");
+        std::vector<uint32_t> expected_chunks = greedy ? std::vector<uint32_t>(17,1) : std::vector<uint32_t>{1,3,4,17,31,64,11};
+        if (greedy) { expected_chunks[0] = 17; }
+        const size_t total_rows = greedy ? 33 : 131;
         require(requests.at("version") == 1 && requests.at("context") == 256 && requests.at("hidden") == 128 &&
                 requests.at("vocab") == 128 && requests.at("chunks") == expected_chunks &&
                 requests.at("layer_ends") == json(agreed.layer_ends) &&
@@ -356,7 +361,7 @@ int main(int argc, char ** argv) {
         std::vector<int32_t> tokens;
         if (!transactional || rank == 0) {
             const auto & token_values = requests.at("tokens");
-            require(token_values.is_array() && token_values.size() == 131, "invalid fixture token count");
+            require(token_values.is_array() && token_values.size() == (greedy ? 17 : 131), "invalid fixture prompt/token count");
             for (const auto & token : token_values) {
                 require(token.is_number_integer(), "fixture tokens must be integers");
                 if (token.is_number_unsigned()) { require(token.get<uint64_t>() < 128, "invalid fixture token ID"); }
@@ -470,7 +475,7 @@ int main(int argc, char ** argv) {
         bool epoch_invalidated = false;
         // Fixed fixture response journal survives context reset. It holds only fingerprints
         // of already globally completed output; it is not a prefix cache or durable snapshot.
-        std::array<digest,7> published_fingerprints{};
+        std::vector<digest> published_fingerprints(expected_chunks.size());
         size_t published_chunks = 0, published_rows = 0;
         const auto execute_epoch = [&](const epoch_plan & plan) {
             const auto epoch_started = std::chrono::steady_clock::now();
@@ -522,6 +527,8 @@ int main(int argc, char ** argv) {
             }
             json commits = json::array();
             json terminal_results = json::array();
+            json feedback_tokens = json::array();
+            auto actual_tokens = tokens;
             std::optional<terminal_outcome> terminal;
             size_t terminal_transfers = 0;
             size_t executions = 0, committed_retries = 0, network_retries = 0;
@@ -537,8 +544,14 @@ int main(int argc, char ** argv) {
                 metadata.session[0] = 1; metadata.position = position;
                 metadata.rows = count; metadata.hidden = 128; metadata.streams = 4;
                 metadata.element = dtype::f32;
+                if (greedy && rank == 0 && chunk) {
+                    require(count == 1 && terminal && actual_tokens.size() == position,
+                            "next decode requires the prior globally committed C result");
+                    actual_tokens.push_back(llama_token(terminal->selected_token));
+                    feedback_tokens.push_back(terminal->selected_token);
+                }
                 step_key step{stamp,chunk+1,chunk+1,position,count,
-                    transactional && rank ? digest{} : fingerprint_bytes(tokens.data()+position,count*sizeof(int32_t))};
+                    transactional && rank ? digest{} : fingerprint_bytes(actual_tokens.data()+position,count*sizeof(int32_t))};
                 if (transactional) {
                     step = agree_begin(rank,step,controls,bounds);
                     metadata.session = session; metadata.epoch = metadata.generation = generation; metadata.chunk = step.chunk;
@@ -546,7 +559,7 @@ int main(int argc, char ** argv) {
                 common_batch batch(context.get());
                 std::vector<float> input;
                 if (rank == 0) {
-                    for (uint32_t row = 0; row < count; ++row) { batch.add(tokens.at(position + row), position + row, 0, false); }
+                    for (uint32_t row = 0; row < count; ++row) { batch.add(actual_tokens.at(position + row), position + row, 0, false); }
                 } else {
                     metadata.sender = rank - 1; metadata.receiver = rank;
                     input = receive_boundary(incoming, *rx, metadata, bounds, uint64_t(bounds.rows) * 512 * sizeof(float), shortly());
@@ -667,6 +680,7 @@ int main(int argc, char ** argv) {
                     {"committed_retries",committed_retries}, {"committed_position",ledger->committed_position()},
                     {"network_retries",network_retries},
                     {"terminal_results",terminal_results}, {"terminal_payload_bytes",terminal_transfers*terminal_wire_bytes},
+                    {"feedback_tokens",feedback_tokens},
                     {"replayed_rows",replayed_rows}, {"new_output_rows",new_output_rows}, {"published_rows",published_rows},
                     {"certificates",commits}, {"reply_bytes",retained.payload_bytes}, {"peak_reply_bytes",retained.peak_payload_bytes},
                     {"reply_page_bytes",retained.page_bytes}, {"peak_reply_page_bytes",retained.peak_page_bytes},
@@ -678,7 +692,7 @@ int main(int argc, char ** argv) {
             if (desktop_source || preloaded) {
                 require(bank.device_banks == 0 && bank.cpu_banks == (rank == 0 ? ends[0] - 1 : ends[rank] - ends[rank-1]) &&
                         bank.buffer_bytes <= (preloaded ? preload.context_bank_bytes : storage.context_bank_bytes) &&
-                        bank.materializations == uint64_t(bank.cpu_banks) * 131 && bank.slot_hits > 0 && bank.failures == 0 &&
+                        bank.materializations == uint64_t(bank.cpu_banks) * total_rows && bank.slot_hits > 0 && bank.failures == 0 &&
                         bank.slot_hits + bank.slot_misses == bank.materializations * 8 && bank.copied_slabs == bank.slot_misses * 3,
                         "streamed worker did not reuse complete backend expert groups or reported inconsistent counters");
                 const json evidence{{"rank",rank}, {"cpu_banks",bank.cpu_banks}, {"device_banks",bank.device_banks},
@@ -692,7 +706,7 @@ int main(int argc, char ** argv) {
             const json performance{{"rank",rank},{"generation",plan.generation},{"compute_ns",compute_ns},{"epoch_wall_ns",wall_ns},
                 {"data_in",io_evidence(incoming.io_stats())},{"data_out",io_evidence(outgoing.io_stats())},{"control",control_io}};
             std::printf("GLM_PIPELINE_IO %s\n",performance.dump().c_str());
-            std::printf("GLM_PIPELINE_DONE %u 131\n", rank);
+            std::printf("GLM_PIPELINE_DONE %u %zu\n", rank, total_rows);
             std::fflush(stdout);
         };
         try { execute_epoch(initial); }

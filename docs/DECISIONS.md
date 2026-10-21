@@ -81,3 +81,6 @@
 - Measure actual native stream transfers and owned CPU graph durations before performance tuning. Count partial completion, saturate rather than wrap, retain healthy reconnect totals and validate an independent protocol-byte ledger. Keep readiness wait distinct from physical link latency and report epoch/model-preload boundaries explicitly. Telemetry does not imply kernel-buffer residency, GPU timing or target throughput.
 
 - Let authenticated A introduce each original request hash through fixed BEGIN, while B/C retain local control over every state coordinate and bound. Remove token plans from workers, hash actual intermediate input and preserve full-key duplicate refusal across reconnects. BEGIN agreement is distinct from resource admission, applied state and global commit; bind future complete sampling/request semantics before production use.
+
+
+- Qualify actual feedback independently: give A only prompt tokens, omit tokens entirely from B/C, and keep expected generated tokens in the separate monolithic oracle/harness. Drive each next input only from the prior authenticated globally committed C result. Exercise both fresh-control exact retry and retained-model recovery after generated output is already published; keep stochastic/RNG semantics separate.

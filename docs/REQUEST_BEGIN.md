@@ -15,3 +15,6 @@ B/C now receive a coordinates-only test plan with the token field removed. Only 
 The fixture hashes actual little-endian int32 token bytes; other fields are separately bound by the complete key and immutable source/model identity. Production must additionally bind complete sampling/generation settings and other request semantics before enabling them. Stateful sampling/RNG, dynamic HTTP requests, client history/image/tool data and production authenticated reset remain absent.
 
 Fourteen session suites include independent Python golden BEGIN bytes, all truncated lengths, domain/reserved/state/role/phase refusal, new request-hash establishment and changed-duplicate rejection. The session suite passes ASan/UBSan, and the full local thirteen-CTest/seven-GLM gate passes. Independent byte ledgers include eight 304-byte BEGIN frames per control peer (144 payload plus 160 header). Native exact-source BEGIN qualification is pending.
+
+
+Native qualification passes at fadd5e3a2, Windows run 39586278010, on CPU/SM89/SM120a hosted builds. Thirteen CTest targets, fourteen session suites, seven GLM tests and real-header schema pass. Runtime evidence is CPU only. The later autoregressive fixture hashes actual C-selected next inputs; see AUTOREGRESSIVE_FIXTURE.md.

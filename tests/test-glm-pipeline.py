@@ -127,10 +127,10 @@ class Worker:
         self.log.close()
 
 
-def compare(expected: pathlib.Path, actual: pathlib.Path, width: int, exact: bool) -> float:
+def compare(expected: pathlib.Path, actual: pathlib.Path, width: int, exact: bool, token_count: int = 131) -> float:
     reference = expected.read_bytes()
     computed = actual.read_bytes()
-    if len(reference) != 131 * width * 4 or len(computed) != len(reference):
+    if len(reference) != token_count * width * 4 or len(computed) != len(reference):
         raise RuntimeError("missing or incorrectly sized pipeline outputs")
     if exact and reference != computed:
         raise RuntimeError("four-stream pipeline boundary differs from monolithic oracle bytes")
@@ -143,7 +143,7 @@ def compare(expected: pathlib.Path, actual: pathlib.Path, width: int, exact: boo
     return maximum
 
 
-def check_storage(worker: Worker, streamed: bool, logical_bytes: int, locked: bool) -> None:
+def check_storage(worker: Worker, streamed: bool, logical_bytes: int, locked: bool, token_count: int = 131) -> None:
     records = [json.loads(line.removeprefix("GLM_PIPELINE_STORAGE ")) for line in worker.lines
                if line.startswith("GLM_PIPELINE_STORAGE ")]
     if len(records) != 2 or [record["phase"] for record in records] != ["startup", "complete"]:
@@ -159,8 +159,8 @@ def check_storage(worker: Worker, streamed: bool, logical_bytes: int, locked: bo
     if has_source:
         bank = banks[0]
         if not (bank["rank"] == worker.rank and bank["cpu_banks"] == layers and bank["device_banks"] == 0 and
-                0 < bank["buffer_bytes"] <= 16 << 20 and bank["materializations"] == layers * 131 and
-                bank["hits"] > 0 and bank["misses"] > 0 and bank["hits"] + bank["misses"] == layers * 131 * 8 and
+                0 < bank["buffer_bytes"] <= 16 << 20 and bank["materializations"] == layers * token_count and
+                bank["hits"] > 0 and bank["misses"] > 0 and bank["hits"] + bank["misses"] == layers * token_count * 8 and
                 bank["copied_slabs"] == bank["misses"] * 3 and bank["copied_bytes"] > 0 and bank["failures"] == 0):
             raise RuntimeError("worker backend slot/copy counters do not prove complete hot expert reuse")
         print(f"BACKEND_BANK_RANK {worker.rank}: CPU hits {bank['hits']}; misses {bank['misses']}; "
@@ -210,12 +210,20 @@ def check_storage(worker: Worker, streamed: bool, logical_bytes: int, locked: bo
               f"native reads {final['native_read_requests']}; native requested bytes {final['native_read_bytes']}")
 
 
-def check_io(workers: list[Worker], transactional: bool = False, generation: int = 1) -> None:
+def check_io(workers: list[Worker], transactional: bool = False, generation: int = 1,
+             chunks: list[int] | None = None) -> None:
     # Exact byte ledger includes fixed handshakes and every frame; syscall counts/times
     # remain measured OS-dependent values. No TCP/IP overhead or GPU throughput is implied.
-    forwarded = 131*512*4 + 8*160 + 160 + (512*4+160 if transactional else 0)
-    controls = {0: [(0,0),(7040,9792),(10496,9792)],
-                1: [(9792,7040),(0,0),(0,0)], 2: [(9792,10496),(0,0),(0,0)]}
+    sizes = [(rows*512*4) for rows in (chunks or [1,3,4,17,31,64,11])]
+    if transactional:
+        sizes += sizes[:1]
+    forwarded = sum(size + ((size+65535)//65536)*160 for size in sizes) + 160
+    rounds = len(sizes)
+    decisions = 320 + rounds*(304+544+336)
+    acknowledgements = 640 + rounds*(384+416)
+    terminal = acknowledgements + rounds*(272+160)
+    controls = {0: [(0,0),(acknowledgements,decisions),(terminal,decisions)],
+                1: [(decisions,acknowledgements),(0,0),(0,0)], 2: [(decisions,terminal),(0,0),(0,0)]}
     for worker in workers:
         records = [json.loads(line.removeprefix("GLM_PIPELINE_IO ")) for line in worker.lines
                    if line.startswith("GLM_PIPELINE_IO ")]
@@ -358,16 +366,30 @@ def run(oracle: pathlib.Path, executable: pathlib.Path, *, streamed: bool = Fals
                 worker.close()
 
 
-def run_transactions(oracle: pathlib.Path, executable: pathlib.Path) -> None:
+def run_transactions(oracle: pathlib.Path, executable: pathlib.Path, *, greedy: bool = False) -> None:
     """Exercise real graph commits, lost B ACK and process-restart replay with fresh keys."""
     with tempfile.TemporaryDirectory(prefix="glm transaction fixture ") as directory:
         root = pathlib.Path(directory)
         data = root / "independent oracle"
-        generated = subprocess.run([str(oracle), "--glm-pipeline-fixture", str(data), "--glm-pipeline-locked", "--seed", "53"],
+        command = [str(oracle), "--glm-pipeline-fixture", str(data), "--glm-pipeline-locked", "--seed", "53"]
+        if greedy:
+            command += ["--glm-pipeline-greedy"]
+        generated = subprocess.run(command,
                                    capture_output=True, text=True, timeout=60)
         if generated.returncode != 0 or "GLM pipeline oracle:" not in generated.stdout:
             raise RuntimeError(f"transaction oracle failed: {generated.stderr[-4000:]}")
         requests = json.loads((data / "requests.json").read_text())
+        token_count = sum(requests["chunks"])
+        steps = len(requests["chunks"])
+        prompt_requests = None
+        if greedy:
+            if (requests["generation_mode"], requests["prompt_rows"], requests["chunks"], len(requests["tokens"])) != (
+                    "greedy", 17, [17]+[1]*16, 33):
+                raise RuntimeError("independent greedy oracle changed the bounded prompt/decode profile")
+            prompt_plan = dict(requests)
+            prompt_plan["tokens"] = requests["tokens"][:17]
+            prompt_requests = root / "A-prompt-only.json"
+            prompt_requests.write_text(json.dumps(prompt_plan))
         worker_plan = dict(requests)
         del worker_plan["tokens"]
         opaque_requests = root / "worker-coordinates-only.json"
@@ -405,7 +427,8 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path) -> None:
                 if not b.control_port or not c.control_port:
                     raise RuntimeError("transaction fixture omitted independent control listeners")
                 a = Worker(executable, data, key_file, root / f"{label}-A.f32le", 0, b_port, locked=True,
-                           session=session, generation=generation, controls=(b.control_port, c.control_port), recover_once=recover_once)
+                           session=session, generation=generation, controls=(b.control_port, c.control_port), recover_once=recover_once,
+                           requests_override=prompt_requests)
                 workers.append(a)
                 if len({worker.process.pid for worker in workers}) != 3:
                     raise RuntimeError("transaction fixture did not create three distinct model processes")
@@ -436,7 +459,7 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path) -> None:
                         raise RuntimeError("lost-ACK test failed before the intended partial commit")
                     print("LOST_COMMIT_ACK_REFUSAL_PASS: B committed then dropped ACK; A/B/C invalidated; zero output")
                     return
-                check_io(workers,True,2 if recover_once else generation)
+                check_io(workers,True,2 if recover_once else generation,requests["chunks"])
                 certificates: list[list[str]] = []
                 total_owned = 0
                 maximum = 0.0
@@ -449,21 +472,23 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path) -> None:
                     replayed = sum(requests["chunks"][:drop_chunk]) if recover_once else 0
                     if not (record["rank"] == worker.rank and record["generation"] == (2 if recover_once else generation) and
                             record["model_loads"] == 1 and record["contexts_created"] == (2 if recover_once else 1) and
-                            record["executions"] == record["committed_retries"] == 7 and record["committed_position"] == 131 and
+                            record["executions"] == record["committed_retries"] == steps and record["committed_position"] == token_count and
                             record["network_retries"] == 1 and
-                            record["replayed_rows"] == replayed and record["new_output_rows"] == 131-replayed and
-                            record["published_rows"] == 131 and
+                            record["replayed_rows"] == replayed and record["new_output_rows"] == token_count-replayed and
+                            record["published_rows"] == token_count and
                             0 < record["reply_bytes"] <= record["peak_reply_bytes"] <= 256 << 10 and
                             (0 < record["reply_page_bytes"] <= record["peak_reply_page_bytes"] <= 256 << 10 if worker.rank == 1 else
                              record["reply_page_bytes"] == record["peak_reply_page_bytes"] == 0) and
-                            record["full_residency_validated"] is False and len(record["certificates"]) == 7 and
-                            len(set(record["certificates"])) == 7):
+                            record["full_residency_validated"] is False and len(record["certificates"]) == steps and
+                            len(set(record["certificates"])) == steps):
                         raise RuntimeError("worker transaction cursor/retry/certificate evidence differs")
-                    if record["terminal_results"] != ([] if worker.rank == 1 else terminal_oracle()) or record["terminal_payload_bytes"] != (0 if worker.rank == 1 else 8*272):
+                    if record["terminal_results"] != ([] if worker.rank == 1 else terminal_oracle()) or record["terminal_payload_bytes"] != (0 if worker.rank == 1 else (steps+1)*272):
                         raise RuntimeError("compact terminal greedy candidates differ from independent full-logit oracle or payload budget")
+                    if record["feedback_tokens"] != (requests["tokens"][17:] if greedy and worker.rank == 0 else []):
+                        raise RuntimeError("actual C-to-A feedback tokens differ from independent monolithic generation")
                     certificates.append(record["certificates"])
                     print(f"REPLY_CACHE_RANK {worker.rank}: payload peak {record['peak_reply_bytes']}; "
-                          f"native page peak {record['peak_reply_page_bytes']}; seven immutable committed retries")
+                          f"native page peak {record['peak_reply_page_bytes']}; {steps} immutable committed retries")
                     owned = [line.split() for line in worker.lines if line.startswith("GLM_PIPELINE_OWNED ")]
                     ends = [2, 3, 6]
                     if len(owned) != (2 if recover_once else 1) or any(list(map(int, entry[1:4])) !=
@@ -472,25 +497,31 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path) -> None:
                     if recover_once and (f"GLM_PIPELINE_RETAINED_RESET {worker.rank} 1 2" not in worker.lines or owned[0] != owned[1]):
                         raise RuntimeError("worker failed to retain exact model ownership across context reset")
                     owned_bytes = int(owned[0][4]); total_owned += owned_bytes
-                    check_storage(worker, True, owned_bytes, True)
+                    check_storage(worker, True, owned_bytes, True, token_count)
                     maximum = max(maximum, compare(data / f"oracle-{worker.rank}.f32le", worker.output,
-                                                   128 if worker.rank == 2 else 512, True))
+                                                   128 if worker.rank == 2 else 512, True, token_count))
                 if total_owned != requests["model_payload_bytes"] or not all(values == certificates[0] for values in certificates):
                     raise RuntimeError("distributed owners disagree on weight coverage or complete commit certificates")
-                print(f"THREE_PROCESS_TRANSACTIONS_PASS: {label}; seven all-owner commits/retries; 131 tokens; "
+                print(f"THREE_PROCESS_TRANSACTIONS_PASS: {label}; {steps} all-owner commits/retries; {token_count} tokens; "
                       f"byte-exact boundaries/logits; max error {maximum:.9g}; full admission NOT_VALIDATED")
                 print("CONTROL_RECONNECT_RETRY_PASS: fresh handshakes/counters; duplicate boundary/commit served from immutable replies; no extra graph calls")
                 print("COMPACT_TERMINAL_PASS: native C greedy token/top eight match independent oracle; 272 bytes per result; retry outcome unchanged")
                 print("AUTHENTICATED_BEGIN_PASS: B/C receive no token plan; A introduces actual request digest within locally expected state coordinates")
+                if greedy:
+                    print("AUTOREGRESSIVE_GREEDY_PASS: A receives only 17 prompt tokens; 16 actual committed C results drive next decode; independent sequence/boundaries/logits exact")
                 if recover_once:
                     print("RETAINED_WEIGHT_RESET_REPLAY_PASS: same three processes/owned models; two real contexts each; B source stays removed; newer epoch replays exact oracle")
                     if drop_chunk:
-                        print(f"COMMITTED_RESPONSE_CURSOR_PASS: {replayed} old output rows verified during replay; {131-replayed} appended; exact 131-row output without duplicates")
+                        print(f"COMMITTED_RESPONSE_CURSOR_PASS: {replayed} old output rows verified during replay; {token_count-replayed} appended; exact {token_count}-row output without duplicates")
             finally:
                 for worker in reversed(workers):
                     worker.close()
                 key_file.unlink()
 
+        if greedy:
+            attempt("autoregressive-greedy", 1, False)
+            attempt("autoregressive-retained-prefix", 1, True, recover_once=True, drop_chunk=5)
+            return
         attempt("committed", 1, False)
         attempt("lost-ack", 1, True)
         attempt("process-restart-replay", 2, False)
@@ -509,3 +540,4 @@ if __name__ == "__main__":
     run(args.oracle.resolve(strict=True), args.worker.resolve(strict=True), streamed=True)
     run(args.oracle.resolve(strict=True), args.worker.resolve(strict=True), locked=True)
     run_transactions(args.oracle.resolve(strict=True), args.worker.resolve(strict=True))
+    run_transactions(args.oracle.resolve(strict=True), args.worker.resolve(strict=True), greedy=True)

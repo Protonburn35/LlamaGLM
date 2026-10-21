@@ -64,3 +64,6 @@ The compact terminal extension now invokes the existing native greedy sampler on
 Completed epochs now expose actual data/control stream counters (including healthy reconnect proofs) and measured owned CPU graph/epoch wall time. The harness independently checks every byte and successful I/O failure count in normal and recovery profiles. Failed prior epochs and physical/GPU performance remain separate. See RPC_METRICS.md.
 
 The later BEGIN extension removes original token plans from B/C altogether and sends each actual request fingerprint on authenticated A-B/A-C control channels before activations. Local state coordinates and exact duplicate history remain worker checks. Every model/recovery/terminal-result oracle stays exact, with the new control frames included in the byte ledger. See REQUEST_BEGIN.md.
+
+
+The fifth profile adds actual prompt-only autoregressive feedback and retained-model recovery after a 21-row generated prefix. Seventeen transactions/33 processed rows and all generated tokens match a separate monolithic oracle; A receives no future tokens. See AUTOREGRESSIVE_FIXTURE.md.

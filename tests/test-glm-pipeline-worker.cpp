@@ -11,6 +11,7 @@
 #include "stage-boundary.h"
 #include "stage-commit-barrier.h"
 #include "stage-replies.h"
+#include "stage-sampling.h"
 #include "glm-fixture-lock-quota.h"
 
 #include <nlohmann/json.hpp>
@@ -171,27 +172,13 @@ static step_key agree_begin(uint32_t rank, const step_key & proposed, std::array
     return agreed;
 }
 
-static terminal_outcome greedy_outcome(const reply_lease & reply, const commit_certificate & certificate, const limits & bounds) {
-    const auto bytes = reply->payload();
-    const auto & step = reply->receipt().step;
-    require(reply->receipt().rank == 2 && bytes.size == size_t(step.rows)*128*sizeof(float), "invalid terminal fixture logits");
-    std::vector<llama_token_data> candidates(128);
-    for (uint32_t token = 0; token < candidates.size(); ++token) {
-        float score; std::memcpy(&score,bytes.data+((step.rows-1)*128+token)*sizeof(float),sizeof(float));
-        candidates[token] = {llama_token(token),score,0};
-    }
-    llama_sampler_ptr sampler(llama_sampler_init_greedy());
-    require(bool(sampler), "cannot create native terminal greedy sampler");
-    llama_token_data_array native{candidates.data(),candidates.size(),-1,false};
-    llama_sampler_apply(sampler.get(),&native);
-    require(native.selected >= 0 && size_t(native.selected) < native.size, "native terminal sampler did not select a token");
-    terminal_outcome result; result.step = step; result.certificate_digest = fingerprint_commit(certificate,bounds);
-    result.vocabulary = 128; result.selected_token = uint32_t(native.data[native.selected].id);
-    result.selected_logit = native.data[native.selected].logit; result.count = 8; result.row = step.rows-1;
-    std::sort(candidates.begin(),candidates.end(),[](const auto & a, const auto & b) {
-        return a.logit == b.logit ? a.id < b.id : a.logit > b.logit;
-    });
-    for (size_t i = 0; i < result.count; ++i) { result.top[i] = {uint32_t(candidates[i].id),candidates[i].logit}; }
+static terminal_outcome greedy_outcome(const sampling_result & sampled, const commit_certificate & certificate, const limits & bounds) {
+    const sampling_config expected{sampling_mode::greedy,128,0,1,8};
+    require(sampled.configuration == fingerprint_sampling(expected) && sampled.receipt == certificate.owners[2] &&
+            sampled.certificate_digest == fingerprint_commit(certificate,bounds), "terminal fixture sampler configuration/commit differs");
+    terminal_outcome result; result.step = sampled.receipt.step; result.certificate_digest = sampled.certificate_digest;
+    result.vocabulary = 128; result.selected_token = sampled.selected_token; result.selected_logit = sampled.selected_logit;
+    result.count = sampled.count; result.row = sampled.row; result.top = sampled.top;
     return result;
 }
 
@@ -204,7 +191,8 @@ static json terminal_evidence(const terminal_outcome & result) {
 
 static commit_certificate finish_transaction(uint32_t rank, const step_key & step, const owner_receipt & receipt,
         owner_transactions & ledger, reply_cache & replies, std::array<fixture_control, 3> & controls,
-        const limits & bounds, bool drop_ack, std::optional<terminal_outcome> & terminal, size_t & terminal_transfers) {
+        const limits & bounds, bool drop_ack, std::optional<terminal_outcome> & terminal, size_t & terminal_transfers,
+        sampling_transactions * sampler, const reply_lease & retained) {
     commit_certificate decision;
     if (rank == 0) {
         commit_barrier barrier(step, bounds);
@@ -240,6 +228,10 @@ static commit_certificate finish_transaction(uint32_t rank, const step_key & ste
         ++terminal_transfers;
     } else {
         auto & link = controls[0];
+        if (rank == 2) {
+            require(sampler && retained && retained->receipt() == receipt, "missing C sampler or actual retained logits");
+            sampler->draw(receipt,retained->payload());
+        }
         const auto encoded = encode_applied_receipt(receipt, bounds);
         send_control(link, step, kind::state_ack, rank, 0, {encoded.data(), encoded.size()});
         const auto command = read_frame(link.socket, *link.rx, shortly());
@@ -254,9 +246,7 @@ static commit_certificate finish_transaction(uint32_t rank, const step_key & ste
         decode_commit_completion(complete.metadata, {complete.payload.data(), complete.payload.size()},
             step, acknowledged.certificate_digest, bounds);
         if (rank == 2) {
-            if (!terminal || !(terminal->step == step) || terminal->certificate_digest != acknowledged.certificate_digest) {
-                terminal = greedy_outcome(replies.committed_reply(step),decision,bounds);
-            }
+            terminal = greedy_outcome(sampler->complete_after_global(decision),decision,bounds);
             const auto payload = encode_terminal_outcome(*terminal,bounds);
             send_control(link,step,kind::terminal_result,2,0,{payload.data(),payload.size()});
             ++terminal_transfers;
@@ -520,6 +510,8 @@ int main(int argc, char ** argv) {
             std::optional<owner_transactions> ledger;
             std::optional<reply_cache> replies;
             const epoch_stamp stamp{identity,session,generation,generation};
+            std::optional<sampling_transactions> sampler;
+            if (transactional && rank == 2) { sampler.emplace(sampling_config{sampling_mode::greedy,128,0,1,8},stamp,bounds); }
             if (transactional) {
                 ledger.emplace(rank, identity, bounds); ledger->fresh_context(stamp);
                 replies.emplace(rank, stamp, bounds, reply_limits{256u<<10,preloaded ? 256u<<10 : 0,3,
@@ -591,7 +583,7 @@ int main(int argc, char ** argv) {
                 }
                 if (transactional) {
                     const auto decision = finish_transaction(rank, step, *receipt, *ledger, *replies, controls, bounds,
-                        drop_ack && chunk == plan.drop_chunk,terminal,terminal_transfers);
+                        drop_ack && chunk == plan.drop_chunk,terminal,terminal_transfers,sampler ? &*sampler : nullptr,retained);
                     if (rank != 1) { require(bool(terminal), "missing committed terminal result"); terminal_results.push_back(terminal_evidence(*terminal)); }
                     const auto committed_hash = fingerprint_commit(decision, bounds);
                     std::string encoded_hash;
@@ -628,7 +620,7 @@ int main(int argc, char ** argv) {
                         }
                         const auto original_terminal = terminal;
                         const auto repeated = finish_transaction(rank, step, replay->receipt(), *ledger, *replies, controls, bounds,
-                            false,terminal,terminal_transfers);
+                            false,terminal,terminal_transfers,sampler ? &*sampler : nullptr,replay);
                         if (rank != 1) { require(encode_terminal_outcome(*terminal,bounds) == encode_terminal_outcome(*original_terminal,bounds),
                             "committed terminal retry changed its sampled outcome"); }
                         require(fingerprint_commit(repeated,bounds) == committed_hash && ledger->committed_position() == position+count,
@@ -656,6 +648,7 @@ int main(int argc, char ** argv) {
             }
             } catch (...) {
                 if (ledger) {
+                    if (sampler) { sampler->invalidate(); }
                     replies->invalidate();
                     ledger->invalidate();
                     require(llama_context_stage_invalidate(context.get()) && !llama_get_logits(context.get()) &&
@@ -681,6 +674,7 @@ int main(int argc, char ** argv) {
                     {"network_retries",network_retries},
                     {"terminal_results",terminal_results}, {"terminal_payload_bytes",terminal_transfers*terminal_wire_bytes},
                     {"feedback_tokens",feedback_tokens},
+                    {"sampling_committed_draws",sampler ? sampler->committed_draws() : 0},
                     {"replayed_rows",replayed_rows}, {"new_output_rows",new_output_rows}, {"published_rows",published_rows},
                     {"certificates",commits}, {"reply_bytes",retained.payload_bytes}, {"peak_reply_bytes",retained.peak_payload_bytes},
                     {"reply_page_bytes",retained.page_bytes}, {"peak_reply_page_bytes",retained.peak_page_bytes},

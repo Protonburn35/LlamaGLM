@@ -84,3 +84,6 @@
 
 
 - Qualify actual feedback independently: give A only prompt tokens, omit tokens entirely from B/C, and keep expected generated tokens in the separate monolithic oracle/harness. Drive each next input only from the prior authenticated globally committed C result. Exercise both fresh-control exact retry and retained-model recovery after generated output is already published; keep stochastic/RNG semantics separate.
+
+
+- Keep RNG advancement transactional: hash the complete actual C output, clone the committed native sampler for a pending draw, reuse that selection on retries and promote only after separately verified global completion. Reuse the existing owner ledger for contiguous identity/position checks. Bind every supported sampler parameter canonically; keep diagnostics separate from the full distribution and stochastic wire disabled until configuration agreement exists.

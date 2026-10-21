@@ -474,6 +474,7 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path, *, greedy: 
                             record["model_loads"] == 1 and record["contexts_created"] == (2 if recover_once else 1) and
                             record["executions"] == record["committed_retries"] == steps and record["committed_position"] == token_count and
                             record["network_retries"] == 1 and
+                            record["sampling_committed_draws"] == (steps if worker.rank == 2 else 0) and
                             record["replayed_rows"] == replayed and record["new_output_rows"] == token_count-replayed and
                             record["published_rows"] == token_count and
                             0 < record["reply_bytes"] <= record["peak_reply_bytes"] <= 256 << 10 and

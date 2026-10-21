@@ -31,3 +31,6 @@ Actual telemetry passes Windows at 0ab6c9746. A newer local BEGIN codec/driver p
 
 
 BEGIN passes native Windows at fadd5e3a2. The fifth local fixture now exercises real prompt-only autoregressive greedy feedback and retained-model recovery after 21 published rows, with exact independent generation/output and no duplicates. Native autoregressive qualification is pending. Greedy is stateless; transactional stochastic sampler/RNG history, full request identity, production reset/admission/HTTP and physical target execution remain open. See AUTOREGRESSIVE_FIXTURE.md.
+
+
+Actual prompt-only autoregressive generation and retained-model prefix recovery pass Windows at c6dd1be50. Local sampler transactions now qualify cloned native full-vocabulary distribution/RNG, exact retries and global-completion promotion, and actual C greedy execution uses that path. The local gate has fourteen CTest targets/seven GLM tests plus six component ASan/UBSan suites. Native qualification is pending. This does not enable stochastic wire/API requests: configuration negotiation, complete sampling policy support, durable RNG/client replay, resource admission and production reset remain open.

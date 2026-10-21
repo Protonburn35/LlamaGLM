@@ -67,3 +67,6 @@ The later BEGIN extension removes original token plans from B/C altogether and s
 
 
 The fifth profile adds actual prompt-only autoregressive feedback and retained-model recovery after a 21-row generated prefix. Seventeen transactions/33 processed rows and all generated tokens match a separate monolithic oracle; A receives no future tokens. See AUTOREGRESSIVE_FIXTURE.md.
+
+
+C now prepares its greedy outcome on a clone through sampling_transactions before applied acknowledgement and promotes only after checked global completion. Exact retry and retained-epoch behavior remain covered by all actual model profiles. Local distribution/RNG qualification is separate from the still greedy-only terminal wire; see TRANSACTIONAL_SAMPLING.md.

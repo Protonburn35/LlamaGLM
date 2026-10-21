@@ -3,7 +3,7 @@
 | Capability | Status | Evidence/limit |
 | --- | --- | --- |
 | Source | PARTIAL | Planner, owned-layer evaluator, authenticated TCP and test-only three-process workers; no production coordinator |
-| Local CPU fixtures | CPU_FIXTURE_PASS | 8 CTest targets (9 planner cases, 12 wire/auth, 4 identity, 8 boundary-transfer and 8 TCP suites, three-process/missing-middle/changed-tokenizer cases); 4 GLM tests; 2 non-GLM tests |
+| Local CPU fixtures | CPU_FIXTURE_PASS | 9 CTest targets (9 planner cases, 12 wire/auth, 4 identity, 8 boundary-transfer, 6 storage and 8 TCP suites, three-process/missing-middle/changed-tokenizer cases); 4 GLM tests; 2 non-GLM tests |
 | Real tensor descriptors | NATIVE_SCHEMA_LOCAL_PASS | All 1,412 descriptors and 120,358,051,192 logical bytes match native GLM/NextN tensor definitions; zero weight allocation/read; also passed all Windows jobs at a6138c7ec |
 | Windows compile | WINDOWS_COMPILE_PASS (CPU/SM89/SM120a) | f11238d49, run 39531610378: 8 CTest targets including three-process inference, 4 GLM CPU tests and native real-header schema validation, including the 128 MiB bridge and fragmented model fixture |
 | Three-process TCP | THREE_PROCESS_CPU_FIXTURE_PASS | Actual A/B/C CPU processes, six synthetic layers, 131 tokens; GCC/MSVC boundaries/logits byte-exact |
@@ -15,7 +15,7 @@
 Local commands after a CPU CMake build:
 
 ```sh
-ctest --test-dir build -R '^(test-glm-stage|test-glm-plan|test-glm-wire|test-glm-identity|test-glm-boundary|test-glm-net|test-glm-pipeline|test-gguf)$' --output-on-failure
+ctest --test-dir build -R '^(test-glm-stage|test-glm-plan|test-glm-storage|test-glm-wire|test-glm-identity|test-glm-boundary|test-glm-net|test-glm-pipeline|test-gguf)$' --output-on-failure
 build/bin/test-llama-archs --arch glm5-next --backend CPU --seed 53 -v 5
 ```
 
@@ -44,3 +44,5 @@ Native schema validation uses a guarded descriptor-only loader mode: complete ac
 Canonical identity has four local suites: system SHA256 empty/abc and multipart vectors, an independent 479-byte Python encoding/hash golden, 21 field-change digest checks and 22 malformed-contract refusals. Shard enumeration order is canonical; Windows case aliases, path names, duplicate/gapped indices and oversized facts refuse. The three-process fixture validates native descriptors and hashes only the bounded GGUF header. Changing one tokenizer string while keeping geometry and all weight payloads unchanged causes authenticated startup refusal with zero output on A/B/C. This also passes native Windows CNG/CPU at 1c1dade88. No payload checksum, binary attestation or resource/residency guarantee is implied.
 
 The whole-chunk bridge has eight local TCP suites: bit-exact 128 MiB over 32 authenticated fragments; a 64 KiB plus 2 KiB tail at the final allowed context positions; no partial-input return; eight interleaved/repeated coordinate refusals; truncated final body; bad final MAC; zero/insufficient/excessive local input budgets; and an incomplete-chunk deadline. All use real loopback sockets. The bridge owns one bounded input float buffer and one incoming frame, and exposes values only after complete validation. The model fixture now sends its 64-row chunk in two 64 KiB fragments, with unchanged byte-exact boundaries/logits. All eight suites and the fragmented model fixture pass in CPU/SM89/SM120a Windows jobs at f11238d49; downloaded CPU evidence confirms these outputs. These are CPU transport/buffer fixtures, not a 128 MiB GPU allocation or 1M model run.
+
+Storage has six local suites: exact multi-read/tail bytes with Unicode/space paths and move ownership; 200 concurrent reads through one file handle; a tiny physical sparse fixture with a marker above the 4 GiB offset; pre-I/O invalid-span/overflow/null/size refusal and permanent invalidation; source mutation protection (POSIX change detection, Windows write-sharing denial when qualified); and sealed exact-catalog leases with concurrent lookups, strict budgets, missing-expert refusal and retained backing bytes. No source file is mapped. These are primitives, not model-integrated expert caching or a host page-lock/GPU residency result. Windows execution of this new target is pending.

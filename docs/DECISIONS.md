@@ -49,3 +49,6 @@
 
 
 - Preserve v1 expert-only semantics and add explicit preload policy 2 with the same parameter layout. Make host_page_bytes one shared native-page budget covering raw experts and CPU tensor buffers. Reserve raw pages before startup reads; retain the memory-only owner and a lock verifier, never the loader. Refuse extra CPU packing/buffer overrides and propagate allocation failure without heap fallback. Keep GPU/default non-host types unchanged and full residency false until backend work buffers, metadata, network/staging and physical GPU resources are covered. Use separate small KDA/DSA CPU oracles under ordinary native lock quotas; do not weaken target model geometry or native verification.
+
+
+- Route CPU backend direct and explicit-plan work buffers through an opt-in registry capability set once before use. Keep ordinary callers on their existing heap path and avoid changing stable public parameter layouts. Strict stage policy refuses a missing capability. Reserve replacement scratch before releasing old data, include both in peak capacity, and return allocation failure without fallback. Preserve real-model settings; only the separate small independent KDA/DSA CPU oracle uses one thread to fit test lock quota.

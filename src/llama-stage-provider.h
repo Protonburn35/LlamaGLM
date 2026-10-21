@@ -34,6 +34,7 @@ struct llama_stage_weight_source {
     virtual bool report_preload(llama_stage_preload_report & output) const = 0;
     virtual bool report_host(llama_stage_host_report & output) const = 0;
     virtual ggml_backend_buffer_type_t host_buffer_type(ggml_backend_buffer_type_t original) const = 0;
+    virtual void configure_backend(ggml_backend_t backend) const = 0;
     virtual std::unique_ptr<llama_stage_context_experts> create_context(const std::vector<ggml_backend_t> & backends) = 0;
 };
 

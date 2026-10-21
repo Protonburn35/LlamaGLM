@@ -693,13 +693,13 @@ static double stage_compare(const float * actual, const std::vector<float> & exp
     return max_error;
 }
 
-static void test_owned_stage_forward(llama_model * reference, const std::array<llama_model_ptr, 3> & models, size_t seed, uint32_t microbatch = 32) {
+static void test_owned_stage_forward(llama_model * reference, const std::array<llama_model_ptr, 3> & models, size_t seed, uint32_t microbatch = 32, int threads = 4) {
     auto params = llama_stage_context_default_params();
     if (params.n_ctx != 0) { throw std::runtime_error("stage defaults silently shorten the context"); }
     params.n_batch = 64;
     params.n_ubatch = microbatch;
     for (const auto & model : models) { if (model->stage_source) { params.op_offload = false; } }
-    params.n_threads = params.n_threads_batch = 4;
+    params.n_threads = params.n_threads_batch = threads;
     stage_boundaries boundaries;
     for (size_t rank = 0; rank < 2; ++rank) {
         boundaries.rows.emplace("l_out-" + std::to_string(models[rank]->stage.layer_ends[rank] - 1), std::vector<float>{});
@@ -1133,7 +1133,7 @@ static void test_locked_host_stage_models(const std::filesystem::path & director
             }
         }
         if (!std::filesystem::remove(middle_path)) { throw std::runtime_error("locked host model retained its source file"); }
-        test_owned_stage_forward(reference.get(), models, seed, 1);
+        test_owned_stage_forward(reference.get(), models, seed, 1, 1);
         llama_stage_host_report after{}; after.version = 1;
         llama_stage_preload_report final_experts{}; final_experts.version = 1;
         if (!llama_model_stage_host_report(models[1].get(), &after) || after.reserved_page_bytes != startup.reserved_page_bytes ||

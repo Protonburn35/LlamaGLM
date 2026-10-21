@@ -79,14 +79,14 @@ LLAMA_API bool llama_model_stage_preload_report(const struct llama_model * model
 struct llama_stage_host_report {
     uint32_t version; // caller initializes to 1; inspect between decodes and allocation/free operations
     uint32_t native_payload_locks_verified;
-    uint32_t full_residency_validated; // always 0: backend work/metadata/network/GPU admission is separate
+    uint32_t full_residency_validated; // always 0: metadata/network/GPU admission is separate
     int32_t last_native_error;
     uint64_t page_budget;
     uint64_t reserved_page_bytes;
     uint64_t peak_reserved_page_bytes;
     uint64_t expert_page_bytes;
-    uint64_t tensor_requested_bytes;
-    uint64_t tensor_buffers;
+    uint64_t tensor_requested_bytes; // GGML tensor and CPU backend work data
+    uint64_t tensor_buffers;         // includes CPU backend work buffers
     uint64_t pending_buffers;
     uint64_t allocations;
     uint64_t refusals;
@@ -130,7 +130,7 @@ LLAMA_API struct llama_model * llama_model_load_stage_streamed_from_file(
 // Experimental rank 1: preload every owned routed expert into locked host pages and close its readers.
 // v1 protects expert payloads; v2 also routes ordinary host tensor/cache/graph/output/bank
 // buffers through the same page budget. v2 requires use_extra_bufts=false and no buffer overrides.
-// Backend work buffers, metadata, network/staging and GPU residency still require admission.
+// Metadata, network/staging and GPU residency still require admission.
 LLAMA_API struct llama_model * llama_model_load_stage_preloaded_from_file(
         const char * path_model,
         struct llama_model_params params,

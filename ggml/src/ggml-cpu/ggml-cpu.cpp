@@ -102,6 +102,9 @@ struct ggml_backend_cpu_context {
 
     uint8_t *           work_data;
     size_t              work_size;
+    ggml_backend_buffer_type_t work_buft;
+    ggml_backend_buffer_t work_buffer;
+    bool                work_started;
 
     ggml_abort_callback abort_callback;
     void *              abort_callback_data;
@@ -117,7 +120,8 @@ static const char * ggml_backend_cpu_get_name(ggml_backend_t backend) {
 
 static void ggml_backend_cpu_free(ggml_backend_t backend) {
     struct ggml_backend_cpu_context * cpu_ctx = (struct ggml_backend_cpu_context *)backend->context;
-    delete[] cpu_ctx->work_data;
+    if (cpu_ctx->work_buffer) { ggml_backend_buffer_free(cpu_ctx->work_buffer); }
+    else { delete[] cpu_ctx->work_data; }
     delete cpu_ctx;
     delete backend;
 }
@@ -125,18 +129,25 @@ static void ggml_backend_cpu_free(ggml_backend_t backend) {
 struct ggml_backend_plan_cpu {
     struct ggml_cplan cplan;
     struct ggml_cgraph cgraph;
+    ggml_backend_buffer_t work_buffer = nullptr;
 };
 
 static ggml_backend_graph_plan_t ggml_backend_cpu_graph_plan_create(ggml_backend_t backend, const struct ggml_cgraph * cgraph) {
     struct ggml_backend_cpu_context * cpu_ctx = (struct ggml_backend_cpu_context *)backend->context;
 
     struct ggml_backend_plan_cpu * cpu_plan = new ggml_backend_plan_cpu;
+    cpu_ctx->work_started = true;
 
     cpu_plan->cplan = ggml_graph_plan(cgraph, cpu_ctx->n_threads, cpu_ctx->threadpool);
     cpu_plan->cgraph = *cgraph; // FIXME: deep copy
 
     if (cpu_plan->cplan.work_size > 0) {
-        cpu_plan->cplan.work_data = new uint8_t[cpu_plan->cplan.work_size];
+        if (cpu_ctx->work_buft) {
+            cpu_plan->work_buffer = ggml_backend_buft_alloc_buffer(cpu_ctx->work_buft, cpu_plan->cplan.work_size);
+            cpu_plan->cplan.work_data = cpu_plan->work_buffer ? (uint8_t *)ggml_backend_buffer_get_base(cpu_plan->work_buffer) : nullptr;
+        } else {
+            cpu_plan->cplan.work_data = new uint8_t[cpu_plan->cplan.work_size];
+        }
         if (cpu_plan->cplan.work_data == NULL) {
             delete cpu_plan;
             return NULL;
@@ -153,7 +164,8 @@ static ggml_backend_graph_plan_t ggml_backend_cpu_graph_plan_create(ggml_backend
 static void ggml_backend_cpu_graph_plan_free(ggml_backend_t backend, ggml_backend_graph_plan_t plan) {
     struct ggml_backend_plan_cpu * cpu_plan = (struct ggml_backend_plan_cpu *)plan;
 
-    delete[] cpu_plan->cplan.work_data;
+    if (cpu_plan->work_buffer) { ggml_backend_buffer_free(cpu_plan->work_buffer); }
+    else { delete[] cpu_plan->cplan.work_data; }
     delete cpu_plan;
 
     GGML_UNUSED(backend);
@@ -169,15 +181,24 @@ static enum ggml_status ggml_backend_cpu_graph_plan_compute(ggml_backend_t backe
 
 static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
     struct ggml_backend_cpu_context * cpu_ctx = (struct ggml_backend_cpu_context *)backend->context;
+    cpu_ctx->work_started = true;
 
     struct ggml_cplan cplan = ggml_graph_plan(cgraph, cpu_ctx->n_threads, cpu_ctx->threadpool);
 
     if (cpu_ctx->work_size < cplan.work_size) {
-        delete[] cpu_ctx->work_data;
-        cpu_ctx->work_data = new uint8_t[cplan.work_size];
-        if (cpu_ctx->work_data == NULL) {
-            cpu_ctx->work_size = 0;
-            return GGML_STATUS_ALLOC_FAILED;
+        if (cpu_ctx->work_buft) {
+            auto * buffer = ggml_backend_buft_alloc_buffer(cpu_ctx->work_buft, cplan.work_size);
+            if (!buffer) { return GGML_STATUS_ALLOC_FAILED; }
+            ggml_backend_buffer_free(cpu_ctx->work_buffer);
+            cpu_ctx->work_buffer = buffer;
+            cpu_ctx->work_data = (uint8_t *)ggml_backend_buffer_get_base(buffer);
+        } else {
+            delete[] cpu_ctx->work_data;
+            cpu_ctx->work_data = new uint8_t[cplan.work_size];
+            if (cpu_ctx->work_data == NULL) {
+                cpu_ctx->work_size = 0;
+                return GGML_STATUS_ALLOC_FAILED;
+            }
         }
         cpu_ctx->work_size = cplan.work_size;
     }
@@ -227,6 +248,9 @@ ggml_backend_t ggml_backend_cpu_init(void) {
     ctx->threadpool          = NULL;
     ctx->work_data           = NULL;
     ctx->work_size           = 0;
+    ctx->work_buft           = nullptr;
+    ctx->work_buffer         = nullptr;
+    ctx->work_started        = false;
     ctx->abort_callback      = NULL;
     ctx->abort_callback_data = NULL;
     ctx->use_ref             = false;
@@ -248,6 +272,17 @@ ggml_backend_t ggml_backend_cpu_init(void) {
 
 bool ggml_backend_is_cpu(ggml_backend_t backend) {
     return backend != NULL && ggml_guid_matches(backend->guid, ggml_backend_cpu_guid());
+}
+
+// Optional registry extension. Set once on a fresh, idle backend; keep the type alive
+// until the backend and all of its graph plans are freed. No pageable fallback.
+static bool ggml_backend_cpu_set_work_buffer_type(ggml_backend_t backend, ggml_backend_buffer_type_t buft) {
+    if (!ggml_backend_is_cpu(backend) || !buft || !ggml_backend_buft_is_host(buft) ||
+            !ggml_backend_dev_supports_buft(ggml_backend_get_device(backend), buft)) { return false; }
+    auto * ctx = static_cast<ggml_backend_cpu_context *>(backend->context);
+    if (ctx->work_started || ctx->work_buft) { return false; }
+    ctx->work_buft = buft;
+    return true;
 }
 
 void ggml_backend_cpu_set_n_threads(ggml_backend_t backend_cpu, int n_threads) {
@@ -689,6 +724,9 @@ static void * ggml_backend_cpu_get_proc_address(ggml_backend_reg_t reg, const ch
     }
     if (strcmp(name, "ggml_backend_cpu_set_threadpool") == 0) {
         return (void *)ggml_backend_cpu_set_threadpool;
+    }
+    if (strcmp(name, "ggml_backend_cpu_set_work_buffer_type") == 0) {
+        return (void *)ggml_backend_cpu_set_work_buffer_type;
     }
 
     return NULL;

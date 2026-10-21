@@ -301,6 +301,16 @@ struct stage_weight_source final : llama_stage_weight_source, std::enable_shared
     ggml_backend_buffer_type_t host_buffer_type(ggml_backend_buffer_type_t original) const override {
         return host_pool && ggml_backend_buft_is_host(original) ? host_pool->buffer_type() : original;
     }
+    void configure_backend(ggml_backend_t backend) const override {
+        const auto dev = ggml_backend_get_device(backend);
+        if (!host_pool || ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_CPU) { return; }
+        using setter = bool (*)(ggml_backend_t, ggml_backend_buffer_type_t);
+        const auto reg = ggml_backend_dev_backend_reg(dev);
+        const auto set_work_type = reinterpret_cast<setter>(ggml_backend_reg_get_proc_address(reg, "ggml_backend_cpu_set_work_buffer_type"));
+        if (!set_work_type || !set_work_type(backend, host_pool->buffer_type())) {
+            throw std::runtime_error("CPU backend does not support the required stage work buffer policy");
+        }
+    }
     bool report_host(llama_stage_host_report & output) const override {
         if (!host_pool || !finalized) { return false; }
         host_pool->verify_all();

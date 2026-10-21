@@ -248,6 +248,85 @@ static void external_pages(ggml_backend_dev_t cpu) {
             locked_pages::locked_stats().buffers == baseline.buffers, "external owner outlived final buffer deletion");
 }
 
+static void backend_workspace(ggml_backend_t reference_backend) {
+    const auto cpu = ggml_backend_get_device(reference_backend);
+    using work_setter = bool (*)(ggml_backend_t, ggml_backend_buffer_type_t);
+    const auto set_work_type = reinterpret_cast<work_setter>(ggml_backend_reg_get_proc_address(
+        ggml_backend_dev_backend_reg(cpu), "ggml_backend_cpu_set_work_buffer_type"));
+    require(bool(set_work_type), "CPU backend lacks the opt-in work buffer policy");
+    matrix values(GGML_TYPE_Q6_K);
+    const auto expected = direct(reference_backend, values);
+    graph operation(values.type);
+    const auto plan_size = ggml_graph_plan(operation.computation, 2, nullptr).work_size;
+    require(plan_size > 0, "quantized workspace fixture did not require CPU scratch");
+    const auto data_size = ggml_backend_alloc_ctx_tensors_from_buft_size(operation.metadata.get(), ggml_backend_cpu_buffer_type());
+    const auto data_pages = locked_pages::required_bytes(data_size);
+    const auto work_pages = locked_pages::required_bytes(plan_size);
+    host_buffer_pool pool(cpu, data_pages + 2 * work_pages);
+    ggml_backend_ptr backend(ggml_backend_cpu_init());
+    ggml_backend_cpu_set_n_threads(backend.get(), 2);
+    require(!set_work_type(nullptr, pool.buffer_type()) && !set_work_type(backend.get(), nullptr) &&
+            set_work_type(backend.get(), pool.buffer_type()) && !set_work_type(backend.get(), pool.buffer_type()) &&
+            !set_work_type(reference_backend, pool.buffer_type()), "work buffer policy admitted invalid/reused backend configuration");
+    ggml_backend_buffer_ptr data(ggml_backend_alloc_ctx_tensors_from_buft(operation.metadata.get(), pool.buffer_type()));
+    require(bool(data), "cannot allocate workspace fixture tensors");
+    operation.set(values);
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        require(ggml_backend_graph_compute(backend.get(), operation.computation) == GGML_STATUS_SUCCESS,
+                "locked CPU workspace computation failed");
+        const auto actual = operation.get();
+        require(std::memcmp(expected.data(), actual.data(), actual.size() * sizeof(float)) == 0,
+                "locked CPU workspace changed quantized outputs");
+        pool.verify_all();
+        require(pool.stats().reserved_page_bytes == data_pages + work_pages && pool.stats().allocations == 2,
+                "CPU scratch used a heap fallback or failed to reuse its locked buffer");
+    }
+    auto * plan = ggml_backend_graph_plan_create(backend.get(), operation.computation);
+    require(plan && pool.stats().reserved_page_bytes == data_pages + 2 * work_pages &&
+            ggml_backend_graph_plan_compute(backend.get(), plan) == GGML_STATUS_SUCCESS,
+            "explicit CPU graph plan omitted its locked workspace");
+    const auto planned = operation.get();
+    require(std::memcmp(expected.data(), planned.data(), planned.size() * sizeof(float)) == 0,
+            "locked explicit graph plan changed results");
+    pool.verify_all();
+    ggml_backend_graph_plan_free(backend.get(), plan);
+    const auto before_growth = pool.stats();
+    require(locked_pages::required_bytes(ggml_graph_plan(operation.computation, 128, nullptr).work_size) >
+            data_pages + 2 * work_pages - before_growth.reserved_page_bytes,
+            "workspace growth fixture does not exceed remaining shared capacity");
+    ggml_backend_cpu_set_n_threads(backend.get(), 128);
+    require(ggml_backend_graph_compute(backend.get(), operation.computation) == GGML_STATUS_ALLOC_FAILED &&
+            pool.stats().reserved_page_bytes == before_growth.reserved_page_bytes && pool.stats().allocations == before_growth.allocations &&
+            pool.stats().refusals == before_growth.refusals + 1,
+            "failed CPU workspace growth freed the old buffer or used a heap fallback");
+    pool.verify_all();
+    ggml_backend_cpu_set_n_threads(backend.get(), 2);
+    require(ggml_backend_graph_compute(backend.get(), operation.computation) == GGML_STATUS_SUCCESS,
+            "CPU backend lost its retained workspace after refused growth");
+    const auto recovered = operation.get();
+    require(std::memcmp(expected.data(), recovered.data(), recovered.size() * sizeof(float)) == 0,
+            "refused scratch growth corrupted the retained CPU workspace");
+    backend.reset();
+    require(pool.stats().reserved_page_bytes == data_pages && pool.stats().reserved_buffers == 1,
+            "CPU backend/plan destruction leaked locked scratch");
+    data.reset();
+    {
+        host_buffer_pool limited(cpu, data_pages);
+        ggml_backend_ptr constrained(ggml_backend_cpu_init());
+        ggml_backend_cpu_set_n_threads(constrained.get(), 2);
+        require(set_work_type(constrained.get(), limited.buffer_type()), "cannot configure capacity-limited CPU backend");
+        graph limited_operation(values.type);
+        ggml_backend_buffer_ptr tensors(ggml_backend_alloc_ctx_tensors_from_buft(limited_operation.metadata.get(), limited.buffer_type()));
+        require(bool(tensors), "cannot allocate capacity-limited tensor data");
+        limited_operation.set(values);
+        require(ggml_backend_graph_compute(constrained.get(), limited_operation.computation) == GGML_STATUS_ALLOC_FAILED &&
+                !ggml_backend_graph_plan_create(constrained.get(), limited_operation.computation) && limited.stats().refusals == 2 &&
+                limited.stats().reserved_page_bytes == data_pages && limited.stats().reserved_buffers == 1,
+                "CPU workspace capacity refusal used fallback storage or leaked pages");
+        limited.verify_all();
+    }
+}
+
 int main() {
     try {
         ggml_backend_ptr backend(ggml_backend_cpu_init());
@@ -256,8 +335,9 @@ int main() {
         quantized_operations(backend.get()); scheduler(backend.get());
         capacity(ggml_backend_get_device(backend.get())); concurrent_lifetimes(ggml_backend_get_device(backend.get()));
         external_pages(ggml_backend_get_device(backend.get()));
+        backend_workspace(backend.get());
         ggml_quantize_free();
-        std::puts("GLM host buffers: five suites passed (native quant ops, scheduler, shared capacity/cleanup, concurrent/retained lifetime, external preload); full admission NOT_VALIDATED");
+        std::puts("GLM host buffers: six suites passed (native quant ops, scheduler, shared capacity/cleanup, concurrent/retained lifetime, external preload, backend workspace); full admission NOT_VALIDATED");
         return 0;
     } catch (const std::exception & error) {
         std::fprintf(stderr, "GLM host buffer test failed: %s\n", error.what());

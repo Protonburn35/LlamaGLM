@@ -451,6 +451,7 @@ llama_context::llama_context(
 
         // create a list of the set_n_threads functions in the backends
         for (auto & backend : backends) {
+            if (model.stage_source) { model.stage_source->configure_backend(backend.get()); }
             ggml_backend_dev_t dev = ggml_backend_get_device(backend.get());
             ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
             if (reg) {

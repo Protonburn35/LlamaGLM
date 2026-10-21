@@ -5,7 +5,7 @@
 | Source | PARTIAL | Planner, owned-layer evaluator, authenticated TCP and test-only three-process workers; no production coordinator |
 | Local CPU fixtures | CPU_FIXTURE_PASS | 10 CTest targets (9 planner cases, 12 wire/auth, 4 identity, 8 boundary-transfer, 10 storage/cache, 5 quantized-bank and 8 TCP suites, three-process/missing-middle/changed-tokenizer cases); 4 GLM tests; 2 non-GLM tests |
 | Real tensor descriptors | NATIVE_SCHEMA_LOCAL_PASS | All 1,412 descriptors and 120,358,051,192 logical bytes match native GLM/NextN tensor definitions; zero weight allocation/read; also passed all Windows jobs at a6138c7ec |
-| Windows compile | WINDOWS_COMPILE_PASS (CPU/SM89/SM120a) | f122f054c, run 39541392753: 10 CTest targets including buffered and streamed three-process inference, 5 GLM CPU tests with local model streaming and native real-header schema validation, including the 128 MiB bridge and fragmented model fixture |
+| Windows compile | WINDOWS_COMPILE_PASS (CPU/SM89/SM120a) | 501cd81f6, run 39542637183: 10 CTest targets including buffered and streamed three-process inference, 5 GLM CPU tests with local model streaming and native real-header schema validation, including the 128 MiB bridge and fragmented model fixture |
 | Three-process TCP | THREE_PROCESS_CPU_FIXTURE_PASS | Actual A/B/C CPU processes, six synthetic layers, 131 tokens; GCC/MSVC boundaries/logits byte-exact |
 | Ada GPU | SM89_GPU_NOT_RUN | No physical GPU tests |
 | Blackwell GPU | SM120_GPU_NOT_RUN | No physical GPU tests |
@@ -62,3 +62,7 @@ Retained backend slots add a sixth bank suite and extend all five operator cases
 Abort coverage now also checks output visibility: after valid history, aborted A and C contexts return null from raw/indexed residual/logit getters. Clearing memory cannot expose stale buffers again, and recreating A restores valid outputs. Local ten CTest/five GLM/two ordinary llama checks pass. Exact-source Windows qualification is pending.
 
 Retained backend slots are now Windows-qualified at a0ebf83dc, run 39542178816, with six native bank suites and the same exact complete-model outputs and CPU copy counters as Linux. Downloaded CPU artifact 12320400670 confirms this evidence. Python type checking also passed (39542178782). The failed-output-view fix remains pending its own native run.
+
+Failed-output accessors now pass native Windows CPU in all three build variants at 501cd81f6, run 39542637183. Downloaded CPU artifact 12320346577 confirms all five GLM tests with the A/C abort assertions. Both complete three-process profiles remain exact.
+
+Storage now has twelve local suites. Dedicated native locks cover 8 KiB of page-rounded payloads, with real resident-page checks, eight concurrent readers after source-file deletion, retained leases, complete final-release accounting and quota/catalog refusal without pageable fallback. All ten CTest targets and five GLM tests pass after the common backing-type change. The standalone Linux ThreadSanitizer script also passes all twelve suites with real kernel locks and no report; default TSan no-op lock interception correctly failed the production resident-page check and was not accepted as qualification. Native Windows working-set checks are pending. Complete laptop model/state/GPU admission remains absent; see RESIDENT_PAYLOADS.md.

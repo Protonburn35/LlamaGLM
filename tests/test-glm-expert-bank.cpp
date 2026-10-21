@@ -186,7 +186,7 @@ static void failure_cases(ggml_backend_t backend) {
     expert_bank broken(backend, 8, f.specs, 1u << 20, [&](expert_address address) -> expert_lease {
         ++calls;
         if (calls < 3) { return memory.acquire(address); }
-        return std::make_shared<const std::vector<uint8_t>>(1);
+        return std::make_shared<const expert_buffer>(1);
     });
     refused([&] { broken.materialize({0,1,2,3,4,5,6,7}); });
     refused([&] { broken.materialize({0,1,2,3,4,5,6,7}); });
@@ -195,7 +195,7 @@ static void failure_cases(ggml_backend_t backend) {
     bool fail_replacement = false;
     expert_bank replacing(backend, 8, f.specs, 1u << 20, [&](expert_address address) -> expert_lease {
         ++replacement_calls;
-        if (fail_replacement && replacement_calls == 26) { return std::make_shared<const std::vector<uint8_t>>(1); }
+        if (fail_replacement && replacement_calls == 26) { return std::make_shared<const expert_buffer>(1); }
         return memory.acquire(address);
     });
     { auto first = replacing.materialize({0,1,2,3,4,5,6,7}); }

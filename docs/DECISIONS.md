@@ -40,3 +40,5 @@
 - Preserve the original buffered three-process oracle. Qualify streamed A/C processes with a separate monolithic oracle at the same explicit microbatch 1, rather than relaxing exact boundary checks across different compute schedules. Require startup and final source counters without presenting native calls as physical SSD traffic or buffered B as resident.
 
 - Retain immutable complete expert groups in backend banks. Reserve every selected hot slot before choosing unselected LRU victims, commit mappings only after all projection copies finish, and poison any failed replacement. Report backend reuse/copies separately from raw RAM-cache/native-file events; CPU bank counters are not GPU runtime evidence.
+
+- Use dedicated OS allocations for locked host payloads instead of locking shared heap pages. Keep raw-byte and page-rounded lock budgets separate, verify actual native lock state and retain ownership through the final immutable lease. Fail lock/quota errors without a pageable fallback. A locked expert payload store does not establish complete laptop model/state/GPU admission.

@@ -150,8 +150,9 @@ bool expert_address::operator<(const expert_address & other) const {
     return std::tie(file, offset, bytes) < std::tie(other.file, other.offset, other.bytes);
 }
 
-memory_experts::memory_experts(uint64_t byte_budget, size_t entry_budget) : budget(byte_budget), entry_budget(entry_budget) {
-    if (budget == 0 || budget > (1ull << 40) || entry_budget == 0 || entry_budget > 100000) {
+memory_experts::memory_experts(uint64_t byte_budget, size_t entry_budget, uint64_t page_lock_budget) :
+    budget(byte_budget), lock_budget(page_lock_budget), entry_budget(entry_budget) {
+    if (budget == 0 || budget > (1ull << 40) || entry_budget == 0 || entry_budget > 100000 || lock_budget > (1ull << 40)) {
         throw std::invalid_argument("invalid GLM memory expert store budget");
     }
 }
@@ -161,9 +162,13 @@ void memory_experts::preload(expert_address address, const uint8_t * data, size_
             address.offset > (1ull << 44) - bytes || entries.size() >= entry_budget || entries.count(address)) {
         throw std::invalid_argument("GLM expert preload is sealed, duplicated or exceeds local bounds");
     }
-    auto values = std::make_shared<const std::vector<uint8_t>>(data, data + bytes);
+    const uint64_t pages = lock_budget ? expert_buffer::required_locked_bytes(bytes) : 0;
+    if (pages > lock_budget - locked_used) { throw std::invalid_argument("expert payload exceeds the separate page-lock budget"); }
+    auto values = std::make_shared<expert_buffer>(bytes, lock_budget != 0);
+    std::memcpy(values->data(), data, bytes);
     entries.emplace(address, std::move(values));
     used += bytes;
+    locked_used += pages;
 }
 
 void memory_experts::seal(const std::vector<expert_address> & complete_owned_catalog) {
@@ -182,6 +187,11 @@ expert_lease memory_experts::acquire(expert_address address) const {
     const auto found = entries.find(address);
     if (found == entries.end()) { throw std::runtime_error("GLM selected expert is absent; no disk fallback exists in the memory store"); }
     return found->second;
+}
+
+void memory_experts::verify_payload_locks() const {
+    if (!payloads_locked()) { throw std::runtime_error("expert store has no sealed locked-payload policy"); }
+    for (const auto & entry : entries) { entry.second->verify_locked(); }
 }
 
 } // namespace glm_stage

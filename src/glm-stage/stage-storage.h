@@ -46,21 +46,51 @@ struct expert_address {
     bool operator<(const expert_address & other) const;
 };
 
-using expert_lease = std::shared_ptr<const std::vector<uint8_t>>;
+struct locked_buffer_stats {
+    uint64_t bytes;
+    uint64_t buffers;
+};
+
+// Locked buffers own dedicated OS pages, so unrelated heap buffers cannot share their unlock lifetime.
+class expert_buffer {
+public:
+    explicit expert_buffer(size_t bytes, bool lock_pages = false);
+    ~expert_buffer();
+    expert_buffer(const expert_buffer &) = delete;
+    expert_buffer & operator=(const expert_buffer &) = delete;
+    uint8_t * data();
+    const uint8_t * data() const;
+    size_t size() const;
+    const uint8_t * begin() const { return data(); }
+    const uint8_t * end() const { return data() + size(); }
+    uint64_t locked_bytes() const;
+    void verify_locked() const;
+    static uint64_t required_locked_bytes(size_t bytes);
+    static locked_buffer_stats locked_stats();
+private:
+    struct impl;
+    std::unique_ptr<impl> state;
+};
+
+using expert_lease = std::shared_ptr<const expert_buffer>;
 
 // Single-threaded preload/seal, immutable concurrent lookups afterwards. No file handle/read callback.
-// This stores exact raw expert bytes; it does not pin host pages or prove Windows/GPU residency.
+// Optional dedicated-page locking covers raw payloads only, not model/state/GPU admission.
 class memory_experts {
 public:
-    memory_experts(uint64_t byte_budget, size_t entry_budget);
+    memory_experts(uint64_t byte_budget, size_t entry_budget, uint64_t page_lock_budget = 0);
     void preload(expert_address address, const uint8_t * data, size_t bytes);
     void seal(const std::vector<expert_address> & complete_owned_catalog);
     expert_lease acquire(expert_address address) const;
     uint64_t payload_bytes() const { return used; }
+    uint64_t locked_bytes() const { return locked_used; }
+    bool payloads_locked() const { return sealed && lock_budget != 0; }
+    void verify_payload_locks() const;
 
 private:
     uint64_t budget;
     uint64_t used = 0;
+    uint64_t lock_budget = 0, locked_used = 0;
     size_t entry_budget;
     bool sealed = false;
     std::map<expert_address, expert_lease> entries;

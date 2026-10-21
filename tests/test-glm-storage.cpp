@@ -181,6 +181,87 @@ static void sealed_store() {
     refused([&] { bounded.preload(a, f.data.data(), 64); });
 }
 
+static void locked_payload_store() {
+    fixture f;
+    const auto baseline = expert_buffer::locked_stats();
+    const expert_address a{0, 7, 64}, b{0, 91, 128}, absent{0, 999, 64};
+    const uint64_t first_pages = expert_buffer::required_locked_bytes(64);
+    const uint64_t total_pages = first_pages + expert_buffer::required_locked_bytes(128);
+    expert_lease retained;
+    {
+        memory_experts store(192, 2, total_pages);
+        refused([&] { store.acquire(a); });
+        store.preload(a, f.data.data(), 64);
+        store.preload(b, f.data.data() + 64, 128);
+        require(!store.payloads_locked() && store.locked_bytes() == total_pages && total_pages > store.payload_bytes(),
+                "unsealed page-locked store has wrong payload/rounded-page accounting");
+        refused([&] { store.verify_payload_locks(); });
+        store.seal({a,b});
+        require(store.payloads_locked(), "sealed expert payloads have no native lock policy");
+        store.verify_payload_locks();
+        require(std::filesystem::remove(f.file), "cannot remove the unused preload fixture file");
+        std::vector<std::future<void>> readers;
+        for (int i = 0; i < 8; ++i) {
+            readers.push_back(std::async(std::launch::async, [&] {
+                for (int j = 0; j < 50; ++j) {
+                    const auto bytes = store.acquire(b);
+                    bytes->verify_locked();
+                    require(bytes->size() == 128 && std::equal(bytes->begin(), bytes->end(), f.data.begin() + 64),
+                            "concurrent locked expert lease changed bytes");
+                }
+            }));
+        }
+        for (auto & reader : readers) { reader.get(); }
+        refused([&] { store.acquire(absent); });
+        retained = store.acquire(a);
+    }
+    retained->verify_locked();
+    require(retained->locked_bytes() == first_pages && std::equal(retained->begin(), retained->end(), f.data.begin()),
+            "retained expert lease lost its page lock or backing bytes");
+    auto active = expert_buffer::locked_stats();
+    require(active.bytes == baseline.bytes + first_pages && active.buffers == baseline.buffers + 1,
+            "page locks did not follow final expert lease ownership");
+    const std::weak_ptr<const expert_buffer> weak(retained);
+    retained.reset();
+    active = expert_buffer::locked_stats();
+    require(weak.expired() && active.bytes == baseline.bytes && active.buffers == baseline.buffers,
+            "last locked expert lease leaked its page allocation/reservation");
+    std::printf("GLM locked payloads: native locks verified, %llu rounded bytes, file absent, concurrent/retained leases passed; model admission NOT_VALIDATED\n",
+                static_cast<unsigned long long>(total_pages));
+}
+
+static void locked_payload_bounds() {
+    fixture f;
+    const auto before = expert_buffer::locked_stats();
+    const expert_address a{0, 0, 64}, b{0, 64, 64};
+    const auto page = expert_buffer::required_locked_bytes(64);
+    refused([] { expert_buffer invalid(0, true); });
+    refused([] { expert_buffer invalid(size_t(max_expert_read_bytes + 1), true); });
+    {
+        memory_experts insufficient(128, 2, page - 1);
+        refused([&] { insufficient.preload(a, f.data.data(), 64); });
+        require(insufficient.payload_bytes() == 0 && insufficient.locked_bytes() == 0, "lock budget refusal allocated payloads");
+    }
+    {
+        memory_experts bounded(128, 2, page);
+        bounded.preload(a, f.data.data(), 64);
+        refused([&] { bounded.preload(b, f.data.data() + 64, 64); });
+        refused([&] { bounded.seal({a,b}); });
+        require(bounded.payload_bytes() == 64 && bounded.locked_bytes() == page && !bounded.payloads_locked(),
+                "failed preload/catalog leaked lock budget or sealed incomplete data");
+        bounded.seal({a});
+        bounded.verify_payload_locks();
+        refused([&] { bounded.acquire(b); });
+    }
+    memory_experts plain(64, 1);
+    plain.preload(a, f.data.data(), 64);
+    plain.seal({a});
+    refused([&] { plain.verify_payload_locks(); });
+    require(!plain.payloads_locked() && plain.locked_bytes() == 0, "plain heap was reported as page-locked");
+    const auto after = expert_buffer::locked_stats();
+    require(after.bytes == before.bytes && after.buffers == before.buffers, "failed/bounded page-lock operations leaked reservations");
+}
+
 static void desktop_eviction() {
     fixture f;
     auto file = std::make_shared<expert_file>(f.file);
@@ -220,7 +301,7 @@ static void desktop_concurrency() {
         readers.push_back(std::async(std::launch::async, [&] {
             ready.wait();
             const auto bytes = cache.acquire(all);
-            require(*bytes == f.data, "concurrent cached payload differs");
+            require(bytes->size() == f.data.size() && std::equal(bytes->begin(), bytes->end(), f.data.begin()), "concurrent cached payload differs");
             return bytes;
         }));
     }
@@ -255,7 +336,7 @@ static void desktop_weak_leases() {
     auto file = std::make_shared<expert_file>(f.file);
     const expert_address a{0, 0, 64}, b{0, 64, 64}, c{0, 128, 64};
     desktop_experts cache(2, {file}, {a, b, c}, 128, 2);
-    const std::weak_ptr<const std::vector<uint8_t>> weak(cache.acquire(a));
+    const std::weak_ptr<const expert_buffer> weak(cache.acquire(a));
     std::atomic<bool> stop{false};
     auto observer = std::async(std::launch::async, [&] {
         while (!stop.load()) {
@@ -284,8 +365,9 @@ static void desktop_weak_leases() {
 int main() {
     try {
         file_reads(); concurrent_reads(); large_offsets(); invalid_reads(); changed_source(); sealed_store();
+        locked_payload_store(); locked_payload_bounds();
         desktop_eviction(); desktop_concurrency(); desktop_failure(); desktop_weak_leases();
-        std::puts("GLM storage: ten suites passed (native reads, offsets, mutation, sealed leases, desktop cache/dedup/failure/weak leases)");
+        std::puts("GLM storage: twelve suites passed (native reads, sealed/locked payloads, bounds/lifetimes, desktop cache/dedup/failure/weak leases)");
         return 0;
     } catch (const std::exception & error) {
         std::fprintf(stderr, "GLM storage test failed: %s\n", error.what());

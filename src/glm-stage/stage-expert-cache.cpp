@@ -22,7 +22,7 @@ struct payload_ledger {
 struct payload_delete {
     std::shared_ptr<payload_ledger> ledger;
     uint64_t bytes;
-    void operator()(std::vector<uint8_t> * data) const {
+    void operator()(expert_buffer * data) const {
         delete data;
         ledger->bytes -= bytes;
         --ledger->entries;
@@ -141,7 +141,7 @@ struct desktop_experts::impl {
 
         try {
             reservation reserved{ledger, address.bytes};
-            std::unique_ptr<std::vector<uint8_t>, payload_delete> data(new std::vector<uint8_t>(size_t(address.bytes)),
+            std::unique_ptr<expert_buffer, payload_delete> data(new expert_buffer(size_t(address.bytes)),
                 payload_delete{ledger, address.bytes});
             reserved.pending = false;
             files[address.file]->read_exact(address.offset, data->data(), data->size());

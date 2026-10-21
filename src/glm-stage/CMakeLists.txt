@@ -1,6 +1,9 @@
-add_library(llama-glm-storage STATIC stage-storage.cpp stage-expert-cache.cpp)
+add_library(llama-glm-storage STATIC stage-storage.cpp stage-expert-buffer.cpp stage-expert-cache.cpp)
 target_include_directories(llama-glm-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(llama-glm-storage PUBLIC cxx_std_17)
+if (WIN32)
+    target_link_libraries(llama-glm-storage PRIVATE psapi)
+endif()
 
 add_library(llama-glm-expert-bank STATIC stage-expert-bank.cpp)
 target_include_directories(llama-glm-expert-bank PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

@@ -28,6 +28,16 @@ target_include_directories(llama-glm-sampling PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 target_compile_features(llama-glm-sampling PUBLIC cxx_std_17)
 target_link_libraries(llama-glm-sampling PRIVATE llama-glm-wire llama)
 
+add_library(llama-glm-deployment STATIC stage-deployment.cpp)
+target_include_directories(llama-glm-deployment PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_features(llama-glm-deployment PUBLIC cxx_std_17)
+target_link_libraries(llama-glm-deployment PRIVATE llama-glm-wire vendor::nlohmann)
+add_executable(llama-glm-config deployment-main.cpp)
+target_link_libraries(llama-glm-config PRIVATE llama-glm-deployment llama-glm-wire vendor::nlohmann)
+if (MINGW)
+    target_link_options(llama-glm-config PRIVATE -municode)
+endif()
+
 if (LLAMA_BUILD_TESTS)
     if (GGML_CPU)
         add_executable(test-glm-host-buffer ${PROJECT_SOURCE_DIR}/tests/test-glm-host-buffer.cpp)
@@ -71,6 +81,9 @@ if (LLAMA_BUILD_TESTS)
     target_link_libraries(test-glm-pipeline-worker PRIVATE llama-glm-wire llama-glm-sampling llama-glm-storage llama-common vendor::nlohmann)
     if (TARGET test-llama-archs)
         find_package(Python3 COMPONENTS Interpreter REQUIRED)
+        add_test(NAME test-glm-config COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/tests/test-glm-config.py --executable $<TARGET_FILE:llama-glm-config>)
+        set_tests_properties(test-glm-config PROPERTIES TIMEOUT 60)
         add_test(NAME test-glm-pipeline COMMAND ${Python3_EXECUTABLE}
             ${PROJECT_SOURCE_DIR}/tests/test-glm-pipeline.py
             --oracle $<TARGET_FILE:test-llama-archs> --worker $<TARGET_FILE:test-glm-pipeline-worker>)

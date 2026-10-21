@@ -15,3 +15,6 @@ Fourteen boundary suites cover both vector/caller-owned 128 MiB transfers, nontr
 B reports seven completed receives/268,288 input bytes without transaction retry; eight/270,336 for the 131-row transactional profile; eighteen/102,400 for each 33-row feedback profile. Protected capacity is fixed at 131,072 bytes in all cases. The model source remains deleted, and its native read counts do not increase.
 
 This covers the activation receive/reassembly payload and removes outgoing packet payload copies. Control message bodies, crypto provider/part-vector allocations, stack/header data, metadata/threadpool structures, kernel buffers, CUDA staging and actual GPU/WDDM resources remain separate work. The native lock primitive is unchanged and has no pageable fallback. Full B working-set residency/admission stays false; physical target/real mixed-quant/GPU/1M execution remains NOT_RUN.
+
+
+Native Windows qualification passes at 8b5fd3780, run 39591924567: CPU/SM89/SM120a hosted builds pass fourteen CTest targets/seven GLM/native schema gates. Downloaded CPU evidence confirms all protected-input receive counts and exact model/retry/recovery oracles. Full process admission remains false; the next local deployment syntax tool is separate.

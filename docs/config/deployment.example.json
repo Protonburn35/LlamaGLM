@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "rank": 0,
+  "model": {
+    "repository": "unsloth/GLM-5.3-Flash-GGUF",
+    "revision": "a38483c8cd5df544f53d70fb281afe97369d5ab6",
+    "quant": "UD-IQ3_XXS",
+    "files": [
+      "models/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+      "models/GLM-5.3-Flash-UD-IQ3_XXS-00002-of-00004.gguf",
+      "models/GLM-5.3-Flash-UD-IQ3_XXS-00003-of-00004.gguf",
+      "models/GLM-5.3-Flash-UD-IQ3_XXS-00004-of-00004.gguf"
+    ]
+  },
+  "nodes": [
+    {"rank": 0, "address": "192.168.50.10", "data_port": 0, "control_port": 0, "api_port": 8000},
+    {"rank": 1, "address": "192.168.50.11", "data_port": 50051, "control_port": 50052, "api_port": 0},
+    {"rank": 2, "address": "192.168.50.12", "data_port": 50051, "control_port": 50052, "api_port": 0}
+  ],
+  "secret_file": "credentials/glm-psk.bin"
+}

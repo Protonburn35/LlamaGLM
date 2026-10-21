@@ -93,3 +93,6 @@
 
 
 - Reserve/protect B activation input before peer work and authenticate each fragment directly in its exclusive final slice, exposing only complete chunks. Clear accepted active input on failure. Send the original immutable payload behind a separately authenticated fixed header. Preserve caller lifetime/one-writer/deadline rules and keep remaining control/crypto/kernel allocations and aggregate residency explicitly unvalidated.
+
+
+- Separate strict local deployment intent from resource admission. Validate the exact pinned target, all three numeric interfaces/role ports and full-context/default split without opening model/credential files or contacting peers. Bind common topology/capacity/split intent canonically while excluding local rank and private paths. Refuse duplicate/unknown/oversized/deep configurations with sanitized errors; actual native file/credential/resource facts still precede READY.

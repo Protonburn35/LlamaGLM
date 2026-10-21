@@ -245,6 +245,10 @@ static void locked_payload_bounds() {
     const auto page = expert_buffer::required_locked_bytes(64);
     refused([] { expert_buffer invalid(0, true); });
     refused([] { expert_buffer invalid(size_t(max_expert_read_bytes + 1), true); });
+    require(locked_pages::required_bytes(size_t(max_expert_read_bytes + 1)) > max_expert_read_bytes,
+            "generic host page geometry retained the per-expert I/O cap");
+    refused([&] { locked_pages invalid(64, page - 1); });
+    refused([] { locked_pages::required_bytes(0); });
     {
         memory_experts insufficient(128, 2, page - 1);
         refused([&] { insufficient.preload(a, f.data.data(), 64); });

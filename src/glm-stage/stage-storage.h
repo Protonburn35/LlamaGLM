@@ -1,5 +1,7 @@
 #pragma once
 
+#include "stage-locked-pages.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -45,11 +47,6 @@ struct expert_address {
     uint64_t offset;
     uint64_t bytes;
     bool operator<(const expert_address & other) const;
-};
-
-struct locked_buffer_stats {
-    uint64_t bytes;
-    uint64_t buffers;
 };
 
 // Locked buffers own dedicated OS pages, so unrelated heap buffers cannot share their unlock lifetime.

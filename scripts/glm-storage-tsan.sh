@@ -13,6 +13,7 @@ mkdir -p -- "$task_build"
 task_cxx="${CXX:-g++}"
 "$task_cxx" -std=c++17 -O1 -g -fsanitize=thread -pthread -I "$task_root/src/glm-stage" \
     "$task_root/src/glm-stage/stage-storage.cpp" \
+    "$task_root/src/glm-stage/stage-locked-pages.cpp" \
     "$task_root/src/glm-stage/stage-expert-buffer.cpp" \
     "$task_root/src/glm-stage/stage-expert-cache.cpp" \
     "$task_root/tests/test-glm-storage.cpp" "$task_root/tests/glm-storage-tsan-locks.cpp" \

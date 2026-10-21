@@ -2,10 +2,10 @@
 
 | Capability | Status | Evidence/limit |
 | --- | --- | --- |
-| Source | PARTIAL | Planner, owned-layer evaluator, frame codec and mutual proof components; no distributed executor |
-| Local CPU fixtures | CPU_FIXTURE_PASS | 4 CTest targets (8 planner cases, 12 wire/auth suites); 3 GLM tests including owned loading/forward; 2 non-GLM regression tests |
+| Source | PARTIAL | Planner, owned-layer evaluator, authenticated TCP components; no distributed executor |
+| Local CPU fixtures | CPU_FIXTURE_PASS | 5 CTest targets (8 planner cases, 12 wire/auth and 8 TCP suites); 3 GLM tests; 2 non-GLM regression tests |
 | Real tensor descriptors | PASS | 1,412 descriptors across all four pinned headers; no tensor data loaded |
-| Windows compile | WINDOWS_COMPILE_PASS (CPU/SM89/SM120a) | 0e720734d, run 39520456801: 4 CTest targets (9 wire suites), 3 GLM CPU tests; newer mutual-proof changes await their own run |
+| Windows compile | WINDOWS_COMPILE_PASS (CPU/SM89/SM120a) | 79d638759, run 39521399397: 4 CTest targets (12 CNG wire/auth suites), 3 GLM CPU tests; newer TCP source awaits its own run |
 | Three-process TCP | THREE_PROCESS_TCP_NOT_RUN | Transport not implemented |
 | Ada GPU | SM89_GPU_NOT_RUN | No physical GPU tests |
 | Blackwell GPU | SM120_GPU_NOT_RUN | No physical GPU tests |
@@ -15,13 +15,15 @@
 Local commands after a CPU CMake build:
 
 ```sh
-ctest --test-dir build -R '^(test-glm-stage|test-glm-plan|test-glm-wire|test-gguf)$' --output-on-failure
+ctest --test-dir build -R '^(test-glm-stage|test-glm-plan|test-glm-wire|test-glm-net|test-gguf)$' --output-on-failure
 build/bin/test-llama-archs --arch glm5-next --backend CPU --seed 53 -v 5
 ```
 
 Require a nonzero completed-test summary from the architecture runner. A zero exit with muted/no summary is insufficient evidence by itself. Tests are assertions/checks in Release builds too; new checks do not rely on disabled C assertions.
 
-Wire/auth tests require `-DLLAMA_GLM_RPC=ON`. Twelve component suites exercise an RFC 4231 HMAC vector, independent Python-derived key/header/MAC/challenge vectors, every frame/handshake envelope byte and selected payload corruptions, wrong identity/direction/channel/key, replay/skipped frame and handshake rejection, fatal invalidation, forged lengths/counts before payload allocation, control/data separation and a 128 MiB logical boundary processed in bounded 4 MiB fragments. Local backend: OpenSSL 3.5.7. The first nine frame suites also pass native Windows CNG at 0e720734d; the new three handshake suites await their own Windows run. These are component tests with no sockets, fragment reassembly, model execution or distributed transaction semantics.
+Wire/auth tests require `-DLLAMA_GLM_RPC=ON`. Twelve component suites exercise an RFC 4231 HMAC vector, independent Python-derived key/header/MAC/challenge vectors, every frame/handshake envelope byte and selected payload corruptions, wrong identity/direction/channel/key, replay/skipped frame and handshake rejection, fatal invalidation, forged lengths/counts before payload allocation, control/data separation and a 128 MiB logical boundary processed in bounded 4 MiB fragments. Local backend: OpenSSL 3.5.7; all twelve suites also pass native Windows CNG at 79d638759. These are byte-component tests without fragment reassembly, model execution or distributed transaction semantics.
+
+Eight additional TCP suites pass on local Linux with actual loopback sockets in one process: fresh mutual proof, bit-preserving 4 MiB/64 KiB two-way fragments, cancel acknowledgement on an independent control socket while data is backpressured, deadline/EOF permanent shutdown, wrong secret refusal, malformed lengths rejected without reading a body, explicit interface/port conflict and concurrent read/listener interruption. Windows Winsock qualification is pending for this new source. No model executes in these network tests; they are not three-process validation.
 
 Owned-loader qualification uses a synthetic six-layer GLM fixture with small dimensions. It verifies exact rank tensor sets, byte-for-byte provider/file payload equality, owned byte counters, invalid plans/modes, refusal of ordinary context creation/export, and closure of file handles. The source GGUF is removed after use. The experimental side header compiles as C and exports unmangled model/context symbols in the shared library.
 

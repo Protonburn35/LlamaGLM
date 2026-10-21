@@ -17,7 +17,7 @@
 
 namespace glm_rpc {
 
-digest hmac_sha256(const secret & key, const std::vector<bytes_view> & parts) {
+static digest hash_sha256(const secret * key, const std::vector<bytes_view> & parts) {
     for (const auto & part : parts) {
         if ((!part.data && part.size) || part.size > INT_MAX) {
             throw std::invalid_argument("invalid authentication input");
@@ -29,7 +29,7 @@ digest hmac_sha256(const secret & key, const std::vector<bytes_view> & parts) {
         BCRYPT_ALG_HANDLE value = nullptr;
         ~provider() { if (value) { BCryptCloseAlgorithmProvider(value, 0); } }
     } algorithm;
-    if (BCryptOpenAlgorithmProvider(&algorithm.value, BCRYPT_SHA256_ALGORITHM, nullptr, BCRYPT_ALG_HANDLE_HMAC_FLAG) != 0) {
+    if (BCryptOpenAlgorithmProvider(&algorithm.value, BCRYPT_SHA256_ALGORITHM, nullptr, key ? BCRYPT_ALG_HANDLE_HMAC_FLAG : 0) != 0) {
         throw std::runtime_error("cannot initialize SHA256 authentication provider");
     }
     struct hash {
@@ -37,7 +37,7 @@ digest hmac_sha256(const secret & key, const std::vector<bytes_view> & parts) {
         ~hash() { if (value) { BCryptDestroyHash(value); } }
     } state;
     if (BCryptCreateHash(algorithm.value, &state.value, nullptr, 0,
-            const_cast<PUCHAR>(key.data()), ULONG(key.size()), 0) != 0) {
+            key ? const_cast<PUCHAR>(key->data()) : nullptr, key ? ULONG(key->size()) : 0, 0) != 0) {
         throw std::runtime_error("cannot initialize authentication state");
     }
     for (const auto & part : parts) {
@@ -49,23 +49,36 @@ digest hmac_sha256(const secret & key, const std::vector<bytes_view> & parts) {
         throw std::runtime_error("cannot finish message authentication");
     }
 #else
-    std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> private_key(
-        EVP_PKEY_new_raw_private_key(EVP_PKEY_HMAC, nullptr, key.data(), key.size()), &EVP_PKEY_free);
+    std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> private_key(key ?
+        EVP_PKEY_new_raw_private_key(EVP_PKEY_HMAC, nullptr, key->data(), key->size()) : nullptr, &EVP_PKEY_free);
     std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> state(EVP_MD_CTX_new(), &EVP_MD_CTX_free);
-    if (!private_key || !state || EVP_DigestSignInit(state.get(), nullptr, EVP_sha256(), nullptr, private_key.get()) != 1) {
+    if (!state || (key ? (!private_key || EVP_DigestSignInit(state.get(), nullptr, EVP_sha256(), nullptr, private_key.get()) != 1) :
+            EVP_DigestInit_ex(state.get(), EVP_sha256(), nullptr) != 1)) {
         throw std::runtime_error("cannot initialize SHA256 authentication state");
     }
     for (const auto & part : parts) {
-        if (part.size && EVP_DigestSignUpdate(state.get(), part.data, part.size) != 1) {
+        if (part.size && (key ? EVP_DigestSignUpdate(state.get(), part.data, part.size) :
+                EVP_DigestUpdate(state.get(), part.data, part.size)) != 1) {
             throw std::runtime_error("cannot authenticate message");
         }
     }
     size_t size = result.size();
-    if (EVP_DigestSignFinal(state.get(), result.data(), &size) != 1 || size != result.size()) {
+    unsigned int digest_size = 0;
+    const bool success = key ? EVP_DigestSignFinal(state.get(), result.data(), &size) == 1 && size == result.size() :
+        EVP_DigestFinal_ex(state.get(), result.data(), &digest_size) == 1 && digest_size == result.size();
+    if (!success) {
         throw std::runtime_error("cannot finish message authentication");
     }
 #endif
     return result;
+}
+
+digest hmac_sha256(const secret & key, const std::vector<bytes_view> & parts) {
+    return hash_sha256(&key, parts);
+}
+
+digest sha256(const std::vector<bytes_view> & parts) {
+    return hash_sha256(nullptr, parts);
 }
 
 digest random_nonce() {

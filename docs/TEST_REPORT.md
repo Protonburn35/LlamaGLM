@@ -3,9 +3,9 @@
 | Capability | Status | Evidence/limit |
 | --- | --- | --- |
 | Source | PARTIAL | Planner, owned-layer evaluator, authenticated TCP and test-only three-process workers; no production coordinator |
-| Local CPU fixtures | CPU_FIXTURE_PASS | 6 CTest targets (9 planner cases, 12 wire/auth and 8 TCP suites, three-process/missing-middle cases); 4 GLM tests; 2 non-GLM tests |
-| Real tensor descriptors | NATIVE_SCHEMA_LOCAL_PASS | All 1,412 descriptors and 120,358,051,192 logical bytes match native GLM/NextN tensor definitions; zero weight allocation/read; Windows checker result pending |
-| Windows compile | WINDOWS_COMPILE_PASS (CPU/SM89/SM120a) | e5a94c203, run 39526159488: 6 CTest targets including three-process inference, 3 GLM CPU tests |
+| Local CPU fixtures | CPU_FIXTURE_PASS | 7 CTest targets (9 planner cases, 12 wire/auth, 4 identity and 8 TCP suites, three-process/missing-middle/changed-tokenizer cases); 4 GLM tests; 2 non-GLM tests |
+| Real tensor descriptors | NATIVE_SCHEMA_LOCAL_PASS | All 1,412 descriptors and 120,358,051,192 logical bytes match native GLM/NextN tensor definitions; zero weight allocation/read; also passed all Windows jobs at a6138c7ec |
+| Windows compile | WINDOWS_COMPILE_PASS (CPU/SM89/SM120a) | a6138c7ec, run 39529974295: 6 CTest targets including three-process inference, 4 GLM CPU tests and native real-header schema validation; current identity candidate pending |
 | Three-process TCP | THREE_PROCESS_CPU_FIXTURE_PASS | Actual A/B/C CPU processes, six synthetic layers, 131 tokens; GCC/MSVC boundaries/logits byte-exact |
 | Ada GPU | SM89_GPU_NOT_RUN | No physical GPU tests |
 | Blackwell GPU | SM120_GPU_NOT_RUN | No physical GPU tests |
@@ -15,7 +15,7 @@
 Local commands after a CPU CMake build:
 
 ```sh
-ctest --test-dir build -R '^(test-glm-stage|test-glm-plan|test-glm-wire|test-glm-net|test-glm-pipeline|test-gguf)$' --output-on-failure
+ctest --test-dir build -R '^(test-glm-stage|test-glm-plan|test-glm-wire|test-glm-identity|test-glm-net|test-glm-pipeline|test-gguf)$' --output-on-failure
 build/bin/test-llama-archs --arch glm5-next --backend CPU --seed 53 -v 5
 ```
 
@@ -27,7 +27,7 @@ Eight additional TCP suites pass on local Linux and native Windows Winsock at 52
 
 The separate test-glm-pipeline launches three distinct native CPU worker processes. Each loads only its own layers through the stage loader (2/2/2), owns its own recurrent/MLA/index state, and computes actual graph work. A sends all four FP32 streams to B, B computes and forwards to C, and C runs the final head. A separate monolithic generator writes both reference boundaries and all logits before workers start. For 131 tokens over seven uneven chunks, both boundaries and logits are byte-exact under GCC 14.2 and MSVC 19.44 (maximum error 0). The independent tensor-byte total equals the sum of the three reported stage payloads. Direct A-to-C startup without B refuses before any inference output. Windows CPU and both CUDA-linked builds pass at e5a94c203; all model execution remains CPU.
 
-The worker binary is test-only, loopback-only, requires a fresh per-run secret file from the harness, and refuses models without the small six-layer fixture marker/geometry. No worker credential default is embedded or logged. It creates no user service. The generated 80 MiB F32 GGUF and references are temporary synthetic data, not downloaded real weights. Context is 256, not 1M. Production identity/credential provisioning, multi-fragment execution, HTTP/sampling, session transactions, cancellation/rollback, residency and SSD tiers remain absent. These results must not be presented as physical three-PC/full-quant/GPU validation.
+The worker binary is test-only, loopback-only, requires a fresh per-run secret file from the harness, and refuses models without the small six-layer fixture marker/geometry. No worker credential default is embedded or logged. It creates no user service. The generated 80 MiB F32 GGUF and references are temporary synthetic data, not downloaded real weights. Context is 256, not 1M. Production identity/config/credential provisioning, multi-fragment execution, HTTP/sampling, session transactions, cancellation/rollback, residency and SSD tiers remain absent. These results must not be presented as physical three-PC/full-quant/GPU validation.
 
 Owned-loader qualification uses a synthetic six-layer GLM fixture with small dimensions. It verifies exact rank tensor sets, byte-for-byte provider/file payload equality, owned byte counters, invalid plans/modes, refusal of ordinary context creation/export, and closure of file handles. The source GGUF is removed after use. The experimental side header compiles as C and exports unmangled model/context symbols in the shared library.
 
@@ -40,3 +40,5 @@ No target-model logits, full-context allocations, GPU residency, timing or token
 The planner integration cases construct tiny metadata-only GGUF files describing large tensors without allocating those payloads. They cover valid signed/unsigned schedules, middle-stage missing projections, incorrect expert counts, truncated headers, invalid splits, excessive counts and context refusal. Temporary paths include spaces to exercise native argument quoting on Windows. The fixtures are structural, not quant-codec or inference tests.
 
 Native schema validation uses a guarded descriptor-only loader mode: complete actual descriptors populate the ordinary native shape/count checks, rather than the synthetic provider path that creates expected tensors. The report checks every weight buffer is zero-sized and has no data. The six-layer fixture verifies the exact independent byte inventory and refuses nine cases: missing norm, wrong norm width, unknown tensor, invalid mHC stream count, missing KDA projection, missing DSA projection, invalid expert grouping, unknown rope scaling and unknown classifier activation. The planner also refuses an FFN-only structural fixture when native validation is requested. C header syntax and unmangled export checks pass locally. No payload bytes, GPU/cache allocations, residency or model integrity are established by this check.
+
+Canonical identity has four local suites: system SHA256 empty/abc and multipart vectors, an independent 479-byte Python encoding/hash golden, 21 field-change digest checks and 22 malformed-contract refusals. Shard enumeration order is canonical; Windows case aliases, path names, duplicate/gapped indices and oversized facts refuse. The three-process fixture validates native descriptors and hashes only the bounded GGUF header. Changing one tokenizer string while keeping geometry and all weight payloads unchanged causes authenticated startup refusal with zero output on A/B/C. This passes locally; Windows qualification of this newer candidate is pending. No payload checksum, binary attestation or resource/residency guarantee is implied.

@@ -16,6 +16,7 @@ struct bytes_view {
 };
 
 digest hmac_sha256(const secret & key, const std::vector<bytes_view> & parts);
+digest sha256(const std::vector<bytes_view> & parts);
 digest random_nonce();
 bool equal_digest(const digest & a, const digest & b) noexcept;
 void erase_secret(secret & value) noexcept;

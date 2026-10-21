@@ -7,6 +7,7 @@
 #include "ggml-cpp.h"
 #include "gguf.h"
 #include "stage-net.h"
+#include "stage-identity.h"
 
 #include <nlohmann/json.hpp>
 
@@ -34,7 +35,7 @@ static void require(bool condition, const char * message) {
     if (!condition) { throw std::runtime_error(message); }
 }
 
-static void require_fixture(const std::string & path) {
+static execution_identity fixture_identity(const std::string & path) {
     require(std::filesystem::file_size(path) <= (128ull << 20), "worker accepts only the small synthetic test model");
     gguf_context_ptr metadata(gguf_init_from_file(path.c_str(), {true, nullptr}));
     require(bool(metadata), "invalid fixture GGUF metadata");
@@ -49,6 +50,26 @@ static void require_fixture(const std::string & path) {
         require(id >= 0 && gguf_get_kv_type(metadata.get(), id) == GGUF_TYPE_UINT32 &&
                 gguf_get_val_u32(metadata.get(), id) == field.second, "unsupported synthetic fixture geometry");
     }
+    llama_stage_schema_report report{1, 0, 0, 0, 0};
+    require(llama_model_validate_stage_schema(metadata.get(), &report), "complete fixture tensor schema refused");
+    const uint64_t header_bytes = gguf_get_data_offset(metadata.get());
+    require(header_bytes >= 24 && header_bytes <= (32ull << 20), "fixture header exceeds identity limit");
+    std::vector<uint8_t> header_data(size_t(header_bytes), 0);
+    std::ifstream header_file(path, std::ios::binary);
+    header_file.read(reinterpret_cast<char *>(header_data.data()), header_data.size());
+    require(bool(header_file), "cannot read complete fixture header identity");
+    execution_identity value;
+    value.source_revision = compiled_source_revision();
+    value.model_repository = "LlamaGLM/synthetic";
+    value.model_revision = value.source_revision;
+    value.quant = "synthetic-f32";
+    value.shards.push_back({0, "model.gguf", std::filesystem::file_size(path), header_bytes,
+        sha256({{header_data.data(), header_data.size()}})});
+    value.tensors = report.tensors; value.payload_bytes = report.payload_bytes;
+    value.target_layers = report.target_layers; value.nextn_layers = report.nextn_layers;
+    value.experts = 16; value.layer_ends = {2, 4, 6};
+    value.bounds.hidden = 128; value.bounds.rows = 64; value.bounds.context = 256;
+    return value;
 }
 
 int main(int argc, char ** argv) {
@@ -64,7 +85,11 @@ int main(int argc, char ** argv) {
         const uint32_t rank = integer(args.at("--rank"), 2);
         const std::string model_path = args.at("--model");
         const std::string request_path = args.at("--requests");
-        require_fixture(model_path);
+        common_init();
+        common_log_set_verbosity_thold(LOG_LEVEL_ERROR);
+        llama_backend_init();
+        const auto agreed = fixture_identity(model_path);
+        const auto identity = identity_digest(agreed);
         require(std::filesystem::file_size(request_path) <= 16384, "fixture requests exceed limit");
         std::ifstream requests_file(request_path);
         const auto requests = json::parse(requests_file);
@@ -97,9 +122,6 @@ int main(int argc, char ** argv) {
         require(bool(key_input), "cannot read configured fixture key");
         key_input.close();
 
-        common_init();
-        common_log_set_verbosity_thold(LOG_LEVEL_ERROR);
-        llama_backend_init();
         auto params = llama_model_default_params();
         ggml_backend_dev_t cpu_only[] = {nullptr};
         params.devices = cpu_only;
@@ -121,9 +143,7 @@ int main(int argc, char ** argv) {
         require(bool(context), "owned fixture context failed to initialize");
         std::ofstream output(args.at("--output"), std::ios::binary);
         require(bool(output), "cannot create fixture worker output");
-        digest identity; identity.fill(0x67);
-        limits bounds;
-        bounds.hidden = 128; bounds.rows = 64; bounds.context = 256;
+        const auto bounds = agreed.bounds;
         tcp_socket outgoing, incoming;
         std::unique_ptr<sender> tx;
         std::unique_ptr<receiver> rx;

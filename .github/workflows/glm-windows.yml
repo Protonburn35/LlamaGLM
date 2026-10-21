@@ -87,7 +87,7 @@ jobs:
           if "%GLM_ENABLE_CUDA%"=="true" set "GLM_CUDA_FLAGS=-DGGML_CUDA=ON -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache -DCMAKE_CUDA_ARCHITECTURES=%CUDA_ARCHS% -DGGML_CUDA_FA_QUANTS=f16-f16;bf16-bf16 -DGGML_CUDA_CCCL_VERSION=%CCCL_SHA% -DFETCHCONTENT_SOURCE_DIR_CCCL=%RUNNER_TEMP%/cccl"
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DGGML_NATIVE=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_GLM_RPC=ON -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_APP=OFF %GLM_CUDA_FLAGS%
           if errorlevel 1 exit /b 1
-          cmake --build build --parallel 2 --target llama-glm-plan test-glm-stage test-glm-wire test-glm-net test-glm-pipeline-worker test-gguf test-llama-archs llama-server llama-cli
+          cmake --build build --parallel 2 --target llama-glm-plan test-glm-stage test-glm-wire test-glm-identity test-glm-net test-glm-pipeline-worker test-gguf test-llama-archs llama-server llama-cli
           if errorlevel 1 exit /b 1
           dumpbin /dependents build\bin\test-gguf.exe > build\dll-dependencies.txt
           if errorlevel 1 exit /b 1
@@ -103,7 +103,7 @@ jobs:
       - name: Run CPU model, authenticated transport and GGUF fixtures
         shell: pwsh
         run: |
-          ctest --test-dir build -R '^(test-glm-stage|test-glm-plan|test-glm-wire|test-glm-net|test-glm-pipeline|test-gguf)$' --output-on-failure
+          ctest --test-dir build -R '^(test-glm-stage|test-glm-plan|test-glm-wire|test-glm-identity|test-glm-net|test-glm-pipeline|test-gguf)$' --output-on-failure
           if ($LASTEXITCODE -ne 0) { throw 'CPU tests failed' }
           ./build/bin/test-llama-archs.exe --arch glm5-next --backend CPU --seed 53 -v 5 *> glm-cpu-fixture.log
           if ($LASTEXITCODE -ne 0) { throw 'GLM CPU fixture failed' }

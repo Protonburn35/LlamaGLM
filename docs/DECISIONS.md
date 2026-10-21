@@ -24,3 +24,5 @@
 - Qualify the compute chain with three actual owned-layer processes and a separate monolithic oracle. Keep fixture workers loopback-only with explicit small-model guards and per-run secret files, with no embedded worker credential. They remain separate from the production application until identity, admission and session transactions exist. Require missing-middle startup refusal and exact aggregate weight coverage.
 
 - Validate complete descriptors through a guarded no-allocation native loader mode, rather than duplicating attention/KDA/NextN shape tables. Require real descriptors, including unknown-tensor count rejection; do not use the synthetic provider path as a schema validator. Keep payload verification and runtime admission false after metadata validation.
+
+- Bind the complete execution contract with system SHA256 over explicit little-endian fields and length-prefixed ASCII identifiers. Hash bounded GGUF headers (including tokenizer/template metadata) and declared file sizes/revisions; do not require full-weight checksum passes. Treat this identity as a compatibility check, not payload integrity, binary attestation or resource admission.

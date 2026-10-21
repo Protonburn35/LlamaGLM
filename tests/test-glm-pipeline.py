@@ -9,6 +9,7 @@ import math
 import pathlib
 import queue
 import secrets
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -154,6 +155,37 @@ def run(oracle: pathlib.Path, executable: pathlib.Path) -> None:
             print("MISSING_MIDDLE_REFUSAL_PASS: direct A-to-C startup failed before model output")
         finally:
             for worker in reversed(rejected):
+                worker.close()
+
+        # Same geometry and weights, different tokenizer metadata: peers must refuse before graph work.
+        changed = root / "different tokenizer"
+        changed.mkdir()
+        shutil.copyfile(data / "model.gguf", changed / "model.gguf")
+        shutil.copyfile(data / "requests.json", changed / "requests.json")
+        with (changed / "model.gguf").open("r+b") as model_file:
+            header = model_file.read(1 << 20)
+            offset = header.find(b"tok_0")
+            if offset < 0:
+                raise RuntimeError("tokenizer identity fixture token was not found")
+            model_file.seek(offset)
+            model_file.write(b"tOk_0")
+        mismatched: list[Worker] = []
+        try:
+            c = Worker(executable, data, key_file, root / "identity-C.f32le", 2)
+            mismatched.append(c)
+            b = Worker(executable, data, key_file, root / "identity-B.f32le", 1, c.listen_port())
+            mismatched.append(b)
+            a = Worker(executable, changed, key_file, root / "identity-A.f32le", 0, b.listen_port())
+            mismatched.append(a)
+            for worker in reversed(mismatched):
+                worker.finish(False)
+                if any(line.startswith("GLM_PIPELINE_DONE ") for line in worker.lines) or worker.output.stat().st_size:
+                    raise RuntimeError("incompatible model identities produced inference output")
+            if "negotiated identity mismatch" not in a.log_path.read_text(errors="replace").lower():
+                raise RuntimeError("model identity mismatch failed for an unrelated reason")
+            print("MODEL_IDENTITY_REFUSAL_PASS: changed tokenizer header refused before model output")
+        finally:
+            for worker in reversed(mismatched):
                 worker.close()
 
 

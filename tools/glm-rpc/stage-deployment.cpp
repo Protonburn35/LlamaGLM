@@ -1,4 +1,5 @@
 #include "stage-deployment.h"
+#include "target-model.h"
 
 #include <nlohmann/json.hpp>
 
@@ -70,7 +71,7 @@ digest intent(const deployment_config & config) {
     const auto text = [&](const std::string & value) {
         integer(uint32_t(value.size())); encoded.insert(encoded.end(),value.begin(),value.end());
     };
-    integer(1); text("unsloth/GLM-5.3-Flash-GGUF"); text("a38483c8cd5df544f53d70fb281afe97369d5ab6"); text("UD-IQ3_XXS");
+    integer(1); text(target_model::repository); text(target_model::revision); text(target_model::quant);
     integer(config.bounds.context); integer(config.bounds.rows); integer(config.bounds.frame_bytes);
     for (auto end : config.layer_ends) { integer(end); }
     for (const auto & node : config.nodes) {
@@ -113,13 +114,13 @@ deployment_config parse_deployment(const std::string & text, const std::filesyst
         require(result.layer_ends[0] && result.layer_ends[0] < result.layer_ends[1] &&
                 result.layer_ends[1] < result.layer_ends[2] && result.layer_ends[2] == 45,"deployment must own all 45 target layers exactly once");
         const auto & model = value.at("model"); fields(model,{"repository","revision","quant","files"},4);
-        require(model.at("repository") == "unsloth/GLM-5.3-Flash-GGUF" &&
-                model.at("revision") == "a38483c8cd5df544f53d70fb281afe97369d5ab6" && model.at("quant") == "UD-IQ3_XXS",
+        require(model.at("repository") == target_model::repository &&
+                model.at("revision") == target_model::revision && model.at("quant") == target_model::quant,
                 "deployment requires the exact pinned dynamic mixed-quant target");
         const auto & files = model.at("files"); require(files.is_array() && files.size() == 4,"deployment requires all four local model files");
         for (size_t i = 0; i < 4; ++i) {
             result.model_files[i] = local_path(files[i],directory);
-            require(result.model_files[i].filename().u8string() == "GLM-5.3-Flash-UD-IQ3_XXS-0000"+std::to_string(i+1)+"-of-00004.gguf",
+            require(result.model_files[i].filename().u8string() == target_model::shards[i].name,
                     "deployment model filenames/order differ from the pinned four shards");
         }
         result.secret_file = local_path(value.at("secret_file"),directory);

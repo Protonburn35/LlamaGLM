@@ -2,6 +2,7 @@
 """Fetch only the audited GGUF headers, without model tensor payloads."""
 
 import argparse
+import hashlib
 import pathlib
 import urllib.request
 
@@ -14,6 +15,12 @@ HEADERS = [
     (2, 38304, 49261511584),
     (3, 35232, 49075832480),
     (4, 15328, 22020797792),
+]
+HEADER_SHA256 = [
+    "e47e6ba043a5d406cdf695219ff9728666dc3a0392eb7190171ca13fd671d63d",
+    "ad6191c93269faeee16be8d2d1746df56f43e7f6515c26d646368a358f0ad7d4",
+    "eed639822ed7b1e16efe6a4ab6d68728b5b3648c3270fe379218fb984097747e",
+    "269b5ce802b9e424ad10d9781c709eace77e3310e5e1ba63939a3c074bfb20e3",
 ]
 
 
@@ -30,6 +37,8 @@ def fetch_header(number: int, header_bytes: int, file_bytes: int) -> bytes:
         data = response.read(header_bytes + 1)
     if len(data) != header_bytes or data[:4] != b"GGUF":
         raise RuntimeError("invalid or truncated metadata response")
+    if hashlib.sha256(data).hexdigest() != HEADER_SHA256[number-1]:
+        raise RuntimeError("metadata differs from the exact pinned header fingerprint")
     return data
 
 

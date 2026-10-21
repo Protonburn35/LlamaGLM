@@ -24,3 +24,6 @@ The parser produces typed local facts and this digest; callers must keep them im
 The new fifteenth CTest target checks all three owners/defaults, independent Python canonical hashing, reordered nodes, relocated Unicode paths, explicit capacities/split, six intent-changing fields and 39 malformed/privacy refusals. No model or credential file is created for these tests. The full fifteen-CTest/seven-GLM gate and standalone parser/CLI ASan/UBSan pass locally. Exact-source native Windows qualification, including wide Unicode argument handling, is pending.
 
 Production resource admission, protected configuration/control ownership, credential loading, model source inspection, peer provisioning, workers/reset and distributed API remain open. See OPEN_ISSUES.md and RESIDENCY_STATUS.md. Real mixed-quant/GPU/physical three-PC/1M execution remains NOT_RUN.
+
+
+Native Windows syntax/Unicode qualification passes at 11963acff, run 39594391976, in CPU/SM89/SM120a hosted builds with fifteen CTest/seven GLM/native schema gates. A later extension adds separate bounded model-header inspection/reference auditing; check mode retains its original zero-model-access contract. See MODEL_HEADER_FACTS.md.

@@ -10,6 +10,7 @@ on:
       - 'tools/glm-rpc/**'
       - 'tools/CMakeLists.txt'
       - 'tests/**'
+      - 'docs/config/**'
       - 'src/**'
       - 'include/**'
       - 'ggml/**'
@@ -126,11 +127,21 @@ jobs:
           if ($Manifest.admission -ne 'NOT_VALIDATED' -or $Manifest.tensor_payloads_verified) {
             throw 'Metadata audit must not claim runtime admission or payload verification'
           }
+          ./build/bin/llama-glm-config.exe --audit-headers docs/config/deployment.example.json @Headers > model-header-facts.json
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned deployment header audit failed' }
+          $Facts = Get-Content model-header-facts.json -Raw | ConvertFrom-Json
+          if ($Facts.tensor_schema -ne 'VALIDATED' -or $Facts.schema_checked_tensors -ne 1412 -or $Facts.metadata_bytes_read -ne 9518820 -or $Facts.model_payload_bytes_read -ne 0 -or $Facts.full_file_sizes_checked -or -not $Facts.reference_headers_only -or $Facts.admission -ne 'NOT_VALIDATED') {
+            throw 'Reference metadata facts violated bounded reads or admission status'
+          }
+          python tests/test-glm-model-facts.py --executable ./build/bin/llama-glm-config.exe --headers "$env:RUNNER_TEMP/glm-headers"
+          if ($LASTEXITCODE -ne 0) { throw 'Deployment model facts regression failed' }
       - name: Record exact build identity and executable behavior
         shell: pwsh
         run: |
           ./build/bin/llama-glm-plan.exe --version
           if ($LASTEXITCODE -ne 0) { throw 'Planner launch failed' }
+          ./build/bin/llama-glm-config.exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'Deployment checker launch failed' }
           ./build/bin/llama-server.exe --version
           if ($LASTEXITCODE -ne 0) { throw 'Server launch failed' }
           $Status = [ordered]@{ source_sha = $env:GITHUB_SHA; backend = '${{ matrix.backend }}'; run_id = $env:GITHUB_RUN_ID; cuda_architectures = $env:CUDA_ARCHS; three_process_cpu_fixture = 'PASS'; gpu_execution = 'NOT_RUN'; three_pc_execution = 'NOT_RUN'; product_source = 'PARTIAL' }
@@ -145,6 +156,7 @@ jobs:
           path: |
             build-identity.json
             glm-memory-manifest.json
+            model-header-facts.json
             glm-cpu-fixture.log
             build/Testing/Temporary/LastTest.log
             build/CMakeCache.txt

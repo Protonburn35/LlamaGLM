@@ -106,6 +106,16 @@ def run(executable: pathlib.Path) -> None:
         invoke('{"secret_file":"' + private, False)
         invoke('[' * 20 + '0' + ']' * 20, False)
         invoke(json.dumps(initial) + " " * 65536, False)
+        path.write_text(json.dumps(initial))
+        inspected = subprocess.run([str(executable),"--inspect",str(path)],capture_output=True,text=True,timeout=5)
+        if inspected.returncode != 1 or inspected.stdout or private in inspected.stderr or str(path) in inspected.stderr:
+            raise RuntimeError("missing full model files were accepted or exposed private paths")
+        bad_model = pathlib.Path(directory) / initial["model"]["files"][0]
+        bad_model.parent.mkdir(parents=True)
+        bad_model.write_bytes(b"invalid negative file fixture")
+        inspected = subprocess.run([str(executable),"--inspect",str(path)],capture_output=True,text=True,timeout=5)
+        if inspected.returncode != 1 or "source size differs" not in inspected.stderr or inspected.stdout:
+            raise RuntimeError("full model size mismatch reached header parsing or passed inspection")
         version = subprocess.run([str(executable), "--version"], capture_output=True, text=True, timeout=5)
         if version.returncode or "deployment schema 1" not in version.stdout:
             raise RuntimeError("deployment executable did not report its schema/source")

@@ -96,3 +96,6 @@
 
 
 - Separate strict local deployment intent from resource admission. Validate the exact pinned target, all three numeric interfaces/role ports and full-context/default split without opening model/credential files or contacting peers. Bind common topology/capacity/split intent canonically while excluding local rank and private paths. Refuse duplicate/unknown/oversized/deep configurations with sanitized errors; actual native file/credential/resource facts still precede READY.
+
+
+- Verify exact pinned metadata bytes before native header parsing, read only known bounded prefixes and retain native source ownership through checked facts. Keep local full-file size inspection distinct from explicit reference-only header auditing. Reuse the existing native schema/canonical identity and never promote metadata compatibility to payload integrity, a completed load or resource admission.

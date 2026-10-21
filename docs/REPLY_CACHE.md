@@ -21,3 +21,5 @@ Use `bash scripts/glm-replies-sanitizer.sh address` or `thread` for the standalo
 The real-kernel-lock reply harness passes all six suites under both ASan/UBSan and TSan with no report. The final full local thirteen-CTest/seven-GLM gate also passes.
 
 Native Windows qualification passes at 663a0a42f (thirteen CTest/seven GLM). A subsequent actual-process healthy reconnect fixture now serves the first committed request from the same immutable replies after fresh control authentication, with unchanged graph/bank counts and one output append. Its native qualification is pending; uncertainty still requires all-owner reset.
+
+The retained-weight recovery fixture now invalidates and releases old epoch reply owners before reporting reset readiness, then creates a new epoch cache alongside the new context against the same model. Old payload/key state is never reused for the new generation. Production reset orchestration remains open.

@@ -3,7 +3,7 @@
 | Capability | Status | Evidence/limit |
 | --- | --- | --- |
 | Source | PARTIAL | Planner, owned-layer evaluator, authenticated TCP and test-only three-process workers; no production coordinator |
-| Local CPU fixtures | CPU_FIXTURE_PASS | 9 CTest targets (9 planner cases, 12 wire/auth, 4 identity, 8 boundary-transfer, 10 storage/cache and 8 TCP suites, three-process/missing-middle/changed-tokenizer cases); 4 GLM tests; 2 non-GLM tests |
+| Local CPU fixtures | CPU_FIXTURE_PASS | 10 CTest targets (9 planner cases, 12 wire/auth, 4 identity, 8 boundary-transfer, 10 storage/cache, 5 quantized-bank and 8 TCP suites, three-process/missing-middle/changed-tokenizer cases); 4 GLM tests; 2 non-GLM tests |
 | Real tensor descriptors | NATIVE_SCHEMA_LOCAL_PASS | All 1,412 descriptors and 120,358,051,192 logical bytes match native GLM/NextN tensor definitions; zero weight allocation/read; also passed all Windows jobs at a6138c7ec |
 | Windows compile | WINDOWS_COMPILE_PASS (CPU/SM89/SM120a) | e0e467c26, run 39534304336: 9 CTest targets including three-process inference, 4 GLM CPU tests and native real-header schema validation, including the 128 MiB bridge and fragmented model fixture |
 | Three-process TCP | THREE_PROCESS_CPU_FIXTURE_PASS | Actual A/B/C CPU processes, six synthetic layers, 131 tokens; GCC/MSVC boundaries/logits byte-exact |
@@ -15,7 +15,7 @@
 Local commands after a CPU CMake build:
 
 ```sh
-ctest --test-dir build -R '^(test-glm-stage|test-glm-plan|test-glm-storage|test-glm-wire|test-glm-identity|test-glm-boundary|test-glm-net|test-glm-pipeline|test-gguf)$' --output-on-failure
+ctest --test-dir build -R '^(test-glm-stage|test-glm-plan|test-glm-storage|test-glm-expert-bank|test-glm-wire|test-glm-identity|test-glm-boundary|test-glm-net|test-glm-pipeline|test-gguf)$' --output-on-failure
 build/bin/test-llama-archs --arch glm5-next --backend CPU --seed 53 -v 5
 ```
 
@@ -48,3 +48,5 @@ The whole-chunk bridge has eight local TCP suites: bit-exact 128 MiB over 32 aut
 Storage has six local suites: exact multi-read/tail bytes with Unicode/space paths and move ownership; 200 concurrent reads through one file handle; a tiny physical sparse fixture with a marker above the 4 GiB offset; pre-I/O invalid-span/overflow/null/size refusal and permanent invalidation; source mutation protection (POSIX change detection, Windows write-sharing denial when qualified); and sealed exact-catalog leases with concurrent lookups, strict budgets, missing-expert refusal and retained backing bytes. No source file is mapped. These are primitives, not model-integrated expert caching or a host page-lock/GPU residency result. These six suites pass native Windows at 67608b0e9 in CPU/SM89/SM120a jobs, confirmed by downloaded CPU evidence.
 
 Four further local storage suites qualify the new desktop cache: exact leased bytes under capacity refusal/eviction, a concurrent eight-reader miss producing one shared native read (seven waited in the observed run), permanent failure with zero retained reservations and no work admitted on a healthy second file, and 200 weak-lock/eviction stress iterations with payload/entry limits. Rank 1 and overlapping catalogs refuse. A GCC 14.2 ThreadSanitizer build of the complete native storage/cache test ran all ten suites with exit 0 and no report. Nine focused CTest targets plus four GLM tests pass. All ten storage/cache suites pass native MSVC at e0e467c26 in CPU/SM89/SM120a jobs; downloaded CPU evidence also reports seven actual waiters for one native load. File-call counters measure requested native I/O, not physical NVMe transactions; OS file caching remains outside these payload counters.
+
+The expert-bank target runs five local suites. Four mixed-type cases cover all eight publisher tensor types with native GGML CPU MUL_MAT_ID operations, three projections, eight of sixteen selected experts over three token rows, and nonconstant original-ID scales. Full independent tensors provide references. Cold/hot/replacement phases are byte-exact, and native-read counters are 24/24/48. An intentionally wrong scale lookup by slot differs, proving the fixture detects that error. The fifth suite covers budget/ID/distinct-cap refusal before provider reads and permanent invalidation after two slabs were copied but a third source slab failed. Active same-thread and concurrent leases prevent overwrite; moved leases refuse use. Windows qualification is pending. These are projection operators, not a complete streamed-model or GPU execution result.

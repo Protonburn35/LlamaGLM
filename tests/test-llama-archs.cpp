@@ -33,10 +33,8 @@
 #include <utility>
 #include <vector>
 
-#if defined(_WIN32) && defined(LLAMA_GLM_STAGE_STORAGE)
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
+#ifdef LLAMA_GLM_STAGE_STORAGE
+#include "glm-fixture-lock-quota.h"
 #endif
 
 static bool arch_matches(const std::string & filter, llm_arch arch) {
@@ -1027,20 +1025,6 @@ static void test_stage_schema(const std::filesystem::path & path, uint64_t expec
 }
 
 #ifdef LLAMA_GLM_STAGE_STORAGE
-struct fixture_lock_quota {
-#ifdef _WIN32
-    SIZE_T minimum = 0, maximum = 0;
-    DWORD flags = 0;
-    fixture_lock_quota() {
-        if (!GetProcessWorkingSetSizeEx(GetCurrentProcess(), &minimum, &maximum, &flags) ||
-                !SetProcessWorkingSetSizeEx(GetCurrentProcess(), std::max<SIZE_T>(minimum, 16u << 20), std::max<SIZE_T>(maximum, 64u << 20), flags)) {
-            throw std::runtime_error("cannot reserve the test process working-set quota for locked expert qualification");
-        }
-    }
-    ~fixture_lock_quota() { SetProcessWorkingSetSizeEx(GetCurrentProcess(), minimum, maximum, flags); }
-#endif
-};
-
 struct stage_load_progress {
     std::vector<float> values;
     size_t stop_call = 0;
@@ -1060,7 +1044,7 @@ struct stage_load_progress {
 
 static void test_preloaded_stage_models(const std::filesystem::path & path, llama_model * reference,
         llama_model_params params, size_t seed) {
-    [[maybe_unused]] fixture_lock_quota quota;
+    [[maybe_unused]] glm_fixture_lock_quota quota;
     const llama_stage_preload_params preload{1,8,6u<<20,6u<<20,8u<<20,64,0};
     const auto middle_path = path.parent_path() / "preloaded middle.gguf";
     if (!std::filesystem::copy_file(path, middle_path)) { throw std::runtime_error("cannot write isolated preload model fixture"); }
@@ -1108,7 +1092,7 @@ static void test_preloaded_stage_models(const std::filesystem::path & path, llam
 }
 
 static void test_locked_host_stage_models(const std::filesystem::path & directory, llama_model_params params, size_t seed, float stdev) {
-    [[maybe_unused]] fixture_lock_quota quota;
+    [[maybe_unused]] glm_fixture_lock_quota quota;
     // A separate oracle with smaller FFNs fits native unprivileged Linux lock quotas.
     // Latent/KDA widths and all eight selected experts are preserved; the indexer has four heads.
     auto metadata = glm_stage_fixture_metadata();

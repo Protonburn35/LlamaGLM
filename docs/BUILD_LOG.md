@@ -234,3 +234,10 @@ A separate local follow-up connects the existing model progress callback to ever
 The seven-test GLM group passes the independent exact KDA/DSA oracles with weighted monotonic progress and no inference callback. Ten cancellation cases cover both preload policies before I/O, after five slabs, after complete preload, during ordinary weight loading and at final completion. Every case returns no model, permits immediate source-file deletion and then a complete successful preload. Production startup orchestration and native-read deadlines remain absent.
 
 The progress follow-up passes all eleven CTest targets, seven GLM tests, two ordinary llama tests and minimal RPC-disabled compilation. Diagnostic cba82e0c0 failed MSVC compilation because its new to_string use lacked an explicit string header; the header is now included. That run did not reach the native scratch diagnostic.
+
+
+## Windows workspace fixture quota correction
+
+Run 39557752635 at a343f870d3b1bcf45458d678de42f623d0cb31d5 reaches the diagnostic and identifies ERROR_WORKING_SET_QUOTA (1453), not a shared-capacity refusal: planned scratch 1,049,408 bytes, combined budget 2,109,440, live tensor pages 4,096, peak reservation 1,056,768, refusals 0, native failures 1. All three variants compile and fail this same new suite; GLM model tests are not reached. Native lock refusal is correct and remains unchanged.
+
+The test workspace now scopes the same 16 MiB minimum/64 MiB maximum Windows process working-set quota as the existing model fixtures. A shared test-only RAII header restores original values after all locked allocations are destroyed and makes restoration failure fail the test. No production quota or lock policy changes. The actual quantized scratch, budget caps and refusal/retention checks remain intact. Exact-source native qualification of this fixture correction is pending.

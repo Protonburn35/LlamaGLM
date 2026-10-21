@@ -3,6 +3,7 @@
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
 #include "ggml-cpp.h"
+#include "glm-fixture-lock-quota.h"
 
 #include <algorithm>
 #include <array>
@@ -250,6 +251,7 @@ static void external_pages(ggml_backend_dev_t cpu) {
 }
 
 static void backend_workspace(ggml_backend_t reference_backend) {
+    [[maybe_unused]] glm_fixture_lock_quota quota;
     const auto cpu = ggml_backend_get_device(reference_backend);
     using work_setter = bool (*)(ggml_backend_t, ggml_backend_buffer_type_t);
     const auto set_work_type = reinterpret_cast<work_setter>(ggml_backend_reg_get_proc_address(

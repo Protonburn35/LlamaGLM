@@ -18,10 +18,13 @@ import threading
 
 class Worker:
     def __init__(self, executable: pathlib.Path, data: pathlib.Path, key_file: pathlib.Path, output: pathlib.Path,
-                 rank: int, next_port: int = 0, *, streamed: bool = False, locked: bool = False):
+                 rank: int, next_port: int = 0, *, streamed: bool = False, locked: bool = False,
+                 session: str | None = None, generation: int = 1, controls: tuple[int, int] | None = None,
+                 drop_ack: bool = False):
         self.rank = rank
         self.locked = locked
         self.source_removed = False
+        self.control_port = 0
         self.model_path = data / "model.gguf"
         if locked and rank == 1:
             self.model_path = output.parent / "private-B" / output.stem / "model.gguf"
@@ -35,6 +38,12 @@ class Worker:
                    "--storage", "locked" if locked else "streamed" if streamed else "buffered"]
         if next_port:
             command += ["--next-port", str(next_port)]
+        if session is not None:
+            command += ["--session", session, "--generation", str(generation)]
+        if controls is not None:
+            command += ["--control-b", str(controls[0]), "--control-c", str(controls[1])]
+        if drop_ack:
+            command += ["--drop-commit-ack", "1"]
         try:
             self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=self.log, text=True, bufsize=1)
         except Exception:
@@ -58,6 +67,10 @@ class Worker:
             if line is None:
                 raise RuntimeError(f"rank {self.rank} exited before listening: {self.log_path.read_text(errors='replace')[-4000:]}")
             fields = line.split()
+            if fields[:1] == ["GLM_PIPELINE_CONTROL"]:
+                if len(fields) != 3 or int(fields[1]) != self.rank or not 0 < int(fields[2]) < 65536 or self.control_port:
+                    raise RuntimeError("invalid fixture control listener announcement")
+                self.control_port = int(fields[2])
             if fields[:1] == ["GLM_PIPELINE_LISTEN"]:
                 if len(fields) != 3 or int(fields[1]) != self.rank or not 0 < int(fields[2]) < 65536:
                     raise RuntimeError("invalid fixture listener announcement")
@@ -285,6 +298,90 @@ def run(oracle: pathlib.Path, executable: pathlib.Path, *, streamed: bool = Fals
                 worker.close()
 
 
+def run_transactions(oracle: pathlib.Path, executable: pathlib.Path) -> None:
+    """Exercise real graph commits, lost B ACK and process-restart replay with fresh keys."""
+    with tempfile.TemporaryDirectory(prefix="glm transaction fixture ") as directory:
+        root = pathlib.Path(directory)
+        data = root / "independent oracle"
+        generated = subprocess.run([str(oracle), "--glm-pipeline-fixture", str(data), "--glm-pipeline-locked", "--seed", "53"],
+                                   capture_output=True, text=True, timeout=60)
+        if generated.returncode != 0 or "GLM pipeline oracle:" not in generated.stdout:
+            raise RuntimeError(f"transaction oracle failed: {generated.stderr[-4000:]}")
+        requests = json.loads((data / "requests.json").read_text())
+
+        def attempt(label: str, generation: int, drop_ack: bool) -> None:
+            # New credential and session for each process group; never resume old connections.
+            key_file = root / f"{label}-key.bin"
+            key_file.touch(mode=0o600, exist_ok=False)
+            key_file.write_bytes(secrets.token_bytes(32))
+            session = secrets.token_hex(16)
+            workers: list[Worker] = []
+            try:
+                c = Worker(executable, data, key_file, root / f"{label}-C.f32le", 2,
+                           locked=True, session=session, generation=generation)
+                workers.append(c)
+                c_port = c.listen_port()
+                b = Worker(executable, data, key_file, root / f"{label}-B.f32le", 1, c_port,
+                           locked=True, session=session, generation=generation, drop_ack=drop_ack)
+                workers.append(b)
+                b_port = b.listen_port()
+                if not b.control_port or not c.control_port:
+                    raise RuntimeError("transaction fixture omitted independent control listeners")
+                a = Worker(executable, data, key_file, root / f"{label}-A.f32le", 0, b_port, locked=True,
+                           session=session, generation=generation, controls=(b.control_port, c.control_port))
+                workers.append(a)
+                if len({worker.process.pid for worker in workers}) != 3:
+                    raise RuntimeError("transaction fixture did not create three distinct model processes")
+                for worker in reversed(workers):
+                    worker.finish(not drop_ack)
+                if drop_ack:
+                    for worker in workers:
+                        if worker.output.stat().st_size or f"GLM_PIPELINE_INVALIDATED {worker.rank}" not in worker.lines:
+                            raise RuntimeError("uncertain commit emitted output or failed to invalidate every real owner")
+                        if any(line.startswith(("GLM_PIPELINE_DONE ", "GLM_PIPELINE_TRANSACTIONS ")) for line in worker.lines):
+                            raise RuntimeError("uncertain commit was reported complete")
+                    if "injected lost B commit acknowledgement after local commit" not in b.log_path.read_text(errors="replace"):
+                        raise RuntimeError("lost-ACK test failed before the intended partial commit")
+                    print("LOST_COMMIT_ACK_REFUSAL_PASS: B committed then dropped ACK; A/B/C invalidated; zero output")
+                    return
+                certificates: list[list[str]] = []
+                total_owned = 0
+                maximum = 0.0
+                for worker in workers:
+                    records = [json.loads(line.removeprefix("GLM_PIPELINE_TRANSACTIONS ")) for line in worker.lines
+                               if line.startswith("GLM_PIPELINE_TRANSACTIONS ")]
+                    if len(records) != 1:
+                        raise RuntimeError("worker did not report authenticated transaction completion")
+                    record = records[0]
+                    if not (record["rank"] == worker.rank and record["generation"] == generation and
+                            record["executions"] == record["committed_retries"] == 7 and record["committed_position"] == 131 and
+                            record["full_residency_validated"] is False and len(record["certificates"]) == 7 and
+                            len(set(record["certificates"])) == 7):
+                        raise RuntimeError("worker transaction cursor/retry/certificate evidence differs")
+                    certificates.append(record["certificates"])
+                    owned = [line.split() for line in worker.lines if line.startswith("GLM_PIPELINE_OWNED ")]
+                    ends = [2, 3, 6]
+                    if len(owned) != 1 or list(map(int, owned[0][1:4])) != [worker.rank, ends[worker.rank-1] if worker.rank else 0, ends[worker.rank]]:
+                        raise RuntimeError("transaction worker changed its assigned model layers")
+                    owned_bytes = int(owned[0][4]); total_owned += owned_bytes
+                    check_storage(worker, True, owned_bytes, True)
+                    maximum = max(maximum, compare(data / f"oracle-{worker.rank}.f32le", worker.output,
+                                                   128 if worker.rank == 2 else 512, True))
+                if total_owned != requests["model_payload_bytes"] or not all(values == certificates[0] for values in certificates):
+                    raise RuntimeError("distributed owners disagree on weight coverage or complete commit certificates")
+                print(f"THREE_PROCESS_TRANSACTIONS_PASS: {label}; seven all-owner commits/retries; 131 tokens; "
+                      f"byte-exact boundaries/logits; max error {maximum:.9g}; full admission NOT_VALIDATED")
+            finally:
+                for worker in reversed(workers):
+                    worker.close()
+                key_file.unlink()
+
+        attempt("committed", 1, False)
+        attempt("lost-ack", 1, True)
+        attempt("process-restart-replay", 2, False)
+        print("PROCESS_RESTART_REPLAY_PASS: fresh credential/session/generation, replay from zero; retained-weight distributed reset NOT_IMPLEMENTED")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--oracle", required=True, type=pathlib.Path)
@@ -293,3 +390,4 @@ if __name__ == "__main__":
     run(args.oracle.resolve(strict=True), args.worker.resolve(strict=True))
     run(args.oracle.resolve(strict=True), args.worker.resolve(strict=True), streamed=True)
     run(args.oracle.resolve(strict=True), args.worker.resolve(strict=True), locked=True)
+    run_transactions(args.oracle.resolve(strict=True), args.worker.resolve(strict=True))

@@ -550,6 +550,23 @@ static void committed_ack_codec() {
     refused([&] { decode_committed_ack(verified, {payload.data(), payload.size()}, expected, acknowledgement.certificate_digest, bounds); });
     verified.type = kind::commit_ack; verified.receiver = 2;
     refused([&] { decode_committed_ack(verified, {payload.data(), payload.size()}, expected, acknowledgement.certificate_digest, bounds); });
+    const auto completion = encode_commit_completion(certificate, bounds);
+    require(hex(sha256({{completion.data(), completion.size()}})) == "c0d58358fd4e148fb28ac857d503f2f7da26a7948e378c1415bcc8d5337c8b26",
+            "global completion differs from independent Python golden bytes");
+    auto completed = verified; completed.sender = 0; completed.receiver = 1; completed.type = kind::commit_complete;
+    completed.payload_bytes = uint32_t(completion.size()); completed.total_bytes = completion.size();
+    decode_commit_completion(completed, {completion.data(), completion.size()}, expected, acknowledgement.certificate_digest, bounds);
+    for (size_t length = 0; length < completion.size(); ++length) {
+        refused([&] { decode_commit_completion(completed, {completion.data(), length}, expected, acknowledgement.certificate_digest, bounds); });
+    }
+    for (size_t offset : {size_t(0), size_t(8), size_t(10), size_t(12), size_t(16), size_t(108), size_t(144), size_t(175)}) {
+        auto wrong = completion; wrong[offset] ^= 1;
+        refused([&] { decode_commit_completion(completed, {wrong.data(), wrong.size()}, expected, acknowledgement.certificate_digest, bounds); });
+    }
+    completed.sender = 2;
+    refused([&] { decode_commit_completion(completed, {completion.data(), completion.size()}, expected, acknowledgement.certificate_digest, bounds); });
+    completed.sender = 0; completed.type = kind::commit;
+    refused([&] { decode_commit_completion(completed, {completion.data(), completion.size()}, expected, acknowledgement.certificate_digest, bounds); });
     erase_secret(derived);
 }
 

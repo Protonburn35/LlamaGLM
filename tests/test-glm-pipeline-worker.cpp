@@ -9,10 +9,12 @@
 #include "stage-net.h"
 #include "stage-identity.h"
 #include "stage-boundary.h"
+#include "stage-commit-barrier.h"
 #include "glm-fixture-lock-quota.h"
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <charconv>
 #include <cstring>
 #include <filesystem>
@@ -36,6 +38,38 @@ static uint32_t integer(const std::string & value, uint32_t maximum) {
 
 static void require(bool condition, const char * message) {
     if (!condition) { throw std::runtime_error(message); }
+}
+
+static digest fingerprint_bytes(const void * data, size_t bytes) {
+    return sha256({{static_cast<const uint8_t *>(data), bytes}});
+}
+
+struct fixture_control {
+    tcp_socket socket;
+    std::unique_ptr<sender> tx;
+    std::unique_ptr<receiver> rx;
+
+    void bind(const secret & psk, const binding & forward, uint32_t local_rank, const limits & bounds) {
+        auto outgoing = forward, incoming = forward;
+        std::swap(incoming.sender, incoming.receiver);
+        if (local_rank) { std::swap(outgoing, incoming); }
+        struct scoped_secret {
+            secret value;
+            ~scoped_secret() { erase_secret(value); }
+        } tx_key{derive_link_key(psk, outgoing)}, rx_key{derive_link_key(psk, incoming)};
+        tx = std::make_unique<sender>(tx_key.value, outgoing, bounds);
+        rx = std::make_unique<receiver>(rx_key.value, incoming, bounds);
+    }
+};
+
+static void send_control(fixture_control & peer, const step_key & step, kind type,
+        uint32_t sender_rank, uint32_t receiver_rank, bytes_view payload) {
+    header metadata;
+    metadata.type = type; metadata.sender = sender_rank; metadata.receiver = receiver_rank;
+    metadata.session = step.stamp.session; metadata.epoch = step.stamp.epoch; metadata.generation = step.stamp.generation;
+    metadata.transaction = step.transaction; metadata.chunk = step.chunk; metadata.position = step.position;
+    metadata.payload_bytes = uint32_t(payload.size); metadata.total_bytes = payload.size;
+    write_frame(peer.socket, *peer.tx, metadata, payload, shortly());
 }
 
 static execution_identity fixture_identity(const std::string & path, bool locked) {
@@ -86,13 +120,33 @@ int main(int argc, char ** argv) {
         for (const auto & arg : args) {
             require(arg.first == "--rank" || arg.first == "--model" || arg.first == "--requests" ||
                     arg.first == "--output" || arg.first == "--next-port" || arg.first == "--key-file" ||
-                    arg.first == "--storage", "unknown pipeline worker argument");
+                    arg.first == "--storage" || arg.first == "--session" || arg.first == "--generation" ||
+                    arg.first == "--control-b" || arg.first == "--control-c" || arg.first == "--drop-commit-ack",
+                    "unknown pipeline worker argument");
         }
         const auto storage_mode = args.count("--storage") ? args.at("--storage") : "buffered";
         require(storage_mode == "buffered" || storage_mode == "streamed" || storage_mode == "locked", "unknown fixture storage profile");
         const bool locked = storage_mode == "locked";
         const bool streamed = storage_mode != "buffered";
         const uint32_t rank = integer(args.at("--rank"), 2);
+        const bool transactional = args.count("--session") != 0;
+        const bool drop_ack = args.count("--drop-commit-ack") && integer(args.at("--drop-commit-ack"), 1);
+        require(!drop_ack || (transactional && rank == 1), "lost-ACK injection is limited to transactional fixture B");
+        require(!transactional || locked, "transaction fixture requires the small locked-host profile");
+        session_id session{};
+        uint32_t generation = 1;
+        if (transactional) {
+            const auto & value = args.at("--session");
+            require(value.size() == 32, "fixture session requires 16 hexadecimal bytes");
+            for (size_t i = 0; i < session.size(); ++i) {
+                unsigned byte = 0;
+                const auto parsed = std::from_chars(value.data() + 2*i, value.data() + 2*i + 2, byte, 16);
+                require(parsed.ec == std::errc() && parsed.ptr == value.data() + 2*i + 2, "invalid fixture session byte");
+                session[i] = uint8_t(byte);
+            }
+            generation = integer(args.at("--generation"), UINT32_MAX);
+            require(generation > 0 && session != session_id{}, "fixture session/generation must be nonzero");
+        }
         const std::string model_path = args.at("--model");
         const std::string request_path = args.at("--requests");
         common_init();
@@ -218,6 +272,8 @@ int main(int argc, char ** argv) {
         tcp_socket outgoing, incoming;
         std::unique_ptr<sender> tx;
         std::unique_ptr<receiver> rx;
+        std::array<fixture_control, 3> controls;
+        tcp_socket control_listener;
         if (rank < 2) {
             outgoing = tcp_socket::connect({"127.0.0.1", next_port}, shortly());
             const auto peer = authenticate_client(outgoing, psk, {identity,rank,rank+1,channel::data}, shortly());
@@ -225,17 +281,43 @@ int main(int argc, char ** argv) {
         }
         if (rank > 0) {
             auto listener = tcp_socket::listen({"127.0.0.1", 0});
+            if (transactional) {
+                control_listener = tcp_socket::listen({"127.0.0.1", 0});
+                std::printf("GLM_PIPELINE_CONTROL %u %u\n", rank, unsigned(control_listener.local_endpoint().port));
+            }
             std::printf("GLM_PIPELINE_LISTEN %u %u\n", rank, unsigned(listener.local_endpoint().port));
             std::fflush(stdout);
             incoming = listener.accept(shortly());
             const auto peer = authenticate_server(incoming, psk, {identity,rank-1,rank,channel::data}, shortly());
             rx = std::make_unique<receiver>(derive_link_key(psk, peer), peer, bounds);
         }
+        if (transactional) {
+            if (rank == 0) {
+                for (uint32_t remote : {1u, 2u}) {
+                    auto & link = controls[remote];
+                    const auto port = uint16_t(integer(args.at(remote == 1 ? "--control-b" : "--control-c"), 65535));
+                    link.socket = tcp_socket::connect({"127.0.0.1", port}, shortly());
+                    const auto peer = authenticate_client(link.socket, psk, {identity,0,remote,channel::control}, shortly());
+                    link.bind(psk, peer, rank, bounds);
+                }
+            } else {
+                auto & link = controls[0];
+                link.socket = control_listener.accept(shortly());
+                const auto peer = authenticate_server(link.socket, psk, {identity,0,rank,channel::control}, shortly());
+                link.bind(psk, peer, rank, bounds);
+            }
+        }
         std::printf("GLM_PIPELINE_OWNED %u %u %u %llu\n", rank, rank ? ends[rank-1] : 0, ends[rank],
                 static_cast<unsigned long long>(llama_model_size(model.get())));
         std::fflush(stdout);
         erase_secret(psk);
+        std::optional<owner_transactions> ledger;
+        const epoch_stamp stamp{identity,session,generation,generation};
+        if (transactional) { ledger.emplace(rank, identity, bounds); ledger->fresh_context(stamp); }
+        json commits = json::array();
+        size_t executions = 0, committed_retries = 0;
         size_t position = 0;
+        try {
         for (size_t chunk = 0; chunk < expected_chunks.size(); ++chunk) {
             const uint32_t count = expected_chunks[chunk];
             header metadata;
@@ -244,6 +326,11 @@ int main(int argc, char ** argv) {
             metadata.session[0] = 1; metadata.position = position;
             metadata.rows = count; metadata.hidden = 128; metadata.streams = 4;
             metadata.element = dtype::f32;
+            const step_key step{stamp,chunk+1,chunk+1,position,count,
+                fingerprint_bytes(tokens.data() + position, count * sizeof(int32_t))};
+            if (transactional) {
+                metadata.session = session; metadata.epoch = metadata.generation = generation; metadata.chunk = step.chunk;
+            }
             common_batch batch(context.get());
             std::vector<float> input;
             if (rank == 0) {
@@ -256,21 +343,95 @@ int main(int argc, char ** argv) {
                     batch.add_embd({input.data() + row * 512, 1, 512}, &pos, 0, rank == 2);
                 }
             }
+            const auto input_digest = rank ? fingerprint_bytes(input.data(), input.size() * sizeof(float)) : step.request_digest;
+            if (ledger) { require(ledger->prepare(step, input_digest) == step_disposition::execute, "fixture attempted duplicate graph execution"); }
             require(llama_process(context.get(), LLAMA_PROCESS_TYPE_DECODE, batch.get()) == 0, "owned stage decode failed");
+            ++executions;
             const float * values = rank == 2 ? llama_get_logits(context.get()) : llama_get_embeddings(context.get());
             require(values != nullptr, "owned stage did not return output");
             const size_t bytes = count * (rank == 2 ? 128 : 512) * sizeof(float);
-            output.write(reinterpret_cast<const char *>(values), bytes);
-            require(bool(output), "cannot write fixture worker output");
+            std::optional<owner_receipt> receipt;
+            if (ledger) { receipt = ledger->applied(step, fingerprint_bytes(values, bytes)); }
             if (rank < 2) {
                 metadata.sender = rank; metadata.receiver = rank + 1;
                 send_boundary(outgoing, *tx, metadata, bounds, values, count * 512, shortly());
             }
+            if (transactional) {
+                commit_certificate decision;
+                if (rank == 0) {
+                    commit_barrier barrier(step, bounds);
+                    barrier.record_applied(0, *receipt);
+                    for (uint32_t remote : {1u, 2u}) {
+                        auto & link = controls[remote];
+                        const auto frame = read_frame(link.socket, *link.rx, shortly());
+                        barrier.record_applied(remote, decode_applied_ack(frame.metadata,
+                            {frame.payload.data(), frame.payload.size()}, step, bounds));
+                    }
+                    decision = barrier.decision();
+                    const auto encoded = encode_commit_certificate(decision, bounds);
+                    for (uint32_t remote : {1u, 2u}) {
+                        send_control(controls[remote], step, kind::commit, 0, remote, {encoded.data(), encoded.size()});
+                    }
+                    barrier.record_committed(0, make_commit_ack(ledger->commit(decision), decision, bounds));
+                    const auto fingerprint = fingerprint_commit(decision, bounds);
+                    for (uint32_t remote : {1u, 2u}) {
+                        auto & link = controls[remote];
+                        const auto frame = read_frame(link.socket, *link.rx, shortly());
+                        barrier.record_committed(remote, decode_committed_ack(frame.metadata,
+                            {frame.payload.data(), frame.payload.size()}, step, fingerprint, bounds));
+                    }
+                    const auto completion = encode_commit_completion(barrier.committed(), bounds);
+                    for (uint32_t remote : {1u, 2u}) {
+                        send_control(controls[remote], step, kind::commit_complete, 0, remote, {completion.data(), completion.size()});
+                    }
+                } else {
+                    auto & link = controls[0];
+                    const auto encoded = encode_applied_receipt(*receipt, bounds);
+                    send_control(link, step, kind::state_ack, rank, 0, {encoded.data(), encoded.size()});
+                    const auto command = read_frame(link.socket, *link.rx, shortly());
+                    decision = decode_commit_decision(command.metadata, {command.payload.data(), command.payload.size()}, step, bounds);
+                    const auto acknowledged = make_commit_ack(ledger->commit(decision), decision, bounds);
+                    if (drop_ack && chunk == 0) { throw std::runtime_error("injected lost B commit acknowledgement after local commit"); }
+                    const auto ack = encode_commit_ack(acknowledged, bounds);
+                    send_control(link, step, kind::commit_ack, rank, 0, {ack.data(), ack.size()});
+                    const auto complete = read_frame(link.socket, *link.rx, shortly());
+                    decode_commit_completion(complete.metadata, {complete.payload.data(), complete.payload.size()},
+                        step, acknowledged.certificate_digest, bounds);
+                }
+                const auto committed_hash = fingerprint_commit(decision, bounds);
+                std::string encoded_hash;
+                for (const auto byte : committed_hash) {
+                    encoded_hash += "0123456789abcdef"[byte >> 4]; encoded_hash += "0123456789abcdef"[byte & 15];
+                }
+                commits.push_back(encoded_hash);
+                require(ledger->prepare(step, input_digest) == step_disposition::committed &&
+                        ledger->committed_position() == position + count, "committed retry lost state or requested execution");
+                ++committed_retries;
+            }
+            output.write(reinterpret_cast<const char *>(values), bytes);
+            require(bool(output), "cannot write fixture worker output");
             position += count;
+        }
+        } catch (...) {
+            if (ledger) {
+                ledger->invalidate();
+                require(llama_context_stage_invalidate(context.get()) && !llama_get_logits(context.get()) &&
+                        !llama_get_embeddings(context.get()), "uncertain fixture context retained output");
+                outgoing.interrupt(); incoming.interrupt();
+                for (auto & link : controls) { link.socket.interrupt(); }
+                std::printf("GLM_PIPELINE_INVALIDATED %u\n", rank); std::fflush(stdout);
+            }
+            throw;
         }
         output.close();
         require(bool(output), "cannot seal fixture worker output");
         report_storage("complete");
+        if (ledger) {
+            const json evidence{{"rank",rank}, {"generation",generation}, {"executions",executions},
+                {"committed_retries",committed_retries}, {"committed_position",ledger->committed_position()},
+                {"certificates",commits}, {"full_residency_validated",false}};
+            std::printf("GLM_PIPELINE_TRANSACTIONS %s\n", evidence.dump().c_str());
+        }
         llama_stage_bank_report bank{}; bank.version = 1;
         require(llama_context_stage_bank_report(context.get(), &bank) == (desktop_source || preloaded), "wrong fixture bank report source");
         if (desktop_source || preloaded) {

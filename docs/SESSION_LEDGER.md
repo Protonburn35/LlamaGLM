@@ -1,6 +1,6 @@
 # Owner transaction metadata
 
-`owner_transactions` in tools/glm-rpc is a bounded, single-threaded metadata component. It is not connected to graph execution, authenticated control dispatch, reply caching or a production coordinator yet. It cannot establish global commit, resource admission or READY.
+`owner_transactions` in tools/glm-rpc is a bounded, single-threaded metadata component. The fourth synthetic pipeline fixture connects it to real local CPU graphs and authenticated control dispatch. Production coordinator/dispatch, bounded reply caching and live retained-weight recovery remain absent. It cannot establish global commit, resource admission or READY.
 
 Each instance belongs to one rank and one immutable canonical execution identity. A fresh real context activates a nonzero session and strictly newer epoch and state generation. Activation starts at input position zero, transaction/chunk 1; live contexts cannot silently switch epochs. Invalidation requires real-context stop/discard/recreation before another activation. The component does not perform those operations itself.
 
@@ -27,7 +27,7 @@ Conflicting valid retries invalidate the local epoch. Malformed/stale inputs rej
 
 No class instance can be copied. Storage is fixed-size metadata for one pending step and one previous three-owner certificate, independent of connection frame sequences. This is not a durable journal. Worker/coordinator restart and reconnect policy, live rank-authenticated receipt collection, response cursor, terminal sampling/RNG and replay storage remain unimplemented. Prefix, snapshots and speculative rollback remain unsupported.
 
-The six component suites exercise retry states and expiry, malformed bounds/stamps/IDs, conflicting requests/results, missing/wrong owner and broken-chain certificates, a structurally valid certificate that contradicts actual local results, partial local commits followed by all-owner invalidation, strictly newer epochs and exact context capacity. These are metadata tests, not distributed model execution or production recovery evidence.
+The six component suites exercise retry states and expiry, malformed bounds/stamps/IDs, conflicting requests/results, missing/wrong owner and broken-chain certificates, a structurally valid certificate that contradicts actual local results, partial local commits followed by all-owner invalidation, strictly newer epochs and exact context capacity. These are metadata tests, component evidence; the separate fourth pipeline profile supplies limited synthetic distributed model execution, not production recovery evidence.
 
 ## Fixed control payload encoding
 
@@ -56,3 +56,5 @@ After an owner successfully commits the decision locally, make_commit_ack binds 
 The caller must enforce cross-step/session progression through the owner ledgers and future coordinator driver; constructing an isolated barrier is not resource admission or a durable journal. Matching local metadata cannot prove a graph executed. Actual payload retention, response cursor, sampling/RNG and network/model reset orchestration remain absent. Metadata/control allocations are not residency-qualified.
 
 The session target now has twelve suites. New cases exercise all 36 applied/committed owner-order combinations, duplicate ACK masks, incomplete decisions, missing B, malformed or conflicting receipts, complete-certificate binding, uncertain partial commits followed by newer-epoch replay, independent Python commit-ACK golden bytes, exact length/reserved-field refusal and authenticated phase/role separation. The full local twelve-CTest/seven-GLM gate and standalone ASan/UBSan pass. Native qualification of the barrier/commit-ACK extension is pending.
+
+The fourth model-process fixture now connects these components to actual graphs and adds an authenticated A-only COMMIT_COMPLETE notice (envelope kind 15, payload kind 4, 176 bytes). Its body contains the complete common key and canonical decision fingerprint, checked against the locally committed decision. Only the coordinator after all commit ACKs may send it. Diagnostic files are withheld until global completion. A lost B commit ACK invalidates every actual owner with zero output; new processes then replay under a fresh session/credential/generation. See TRANSACTION_FIXTURE.md for topology, limitations and evidence. This does not implement a production reply cache or retained-weight distributed recovery.

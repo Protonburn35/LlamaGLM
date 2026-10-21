@@ -7,7 +7,7 @@ namespace glm_rpc {
 namespace {
 
 constexpr std::array<uint8_t, 8> magic{'G','L','M','T','X','N',0,0};
-constexpr uint16_t format_version = 1, receipt_kind = 1, commit_kind = 2, commit_ack_kind = 3;
+constexpr uint16_t format_version = 1, receipt_kind = 1, commit_kind = 2, commit_ack_kind = 3, completion_kind = 4;
 static_assert(commit_wire_bytes <= max_control_bytes, "transaction certificate must fit one bounded control frame");
 
 template<size_t N> struct writer {
@@ -136,6 +136,13 @@ commit_ack_wire encode_commit_ack(const commit_acknowledgement & acknowledgement
     return encoded.finish();
 }
 
+completion_wire encode_commit_completion(const commit_certificate & committed, const limits & bounds) {
+    const auto fingerprint = fingerprint_commit(committed, bounds);
+    writer<completion_wire_bytes> encoded;
+    encoded.prefix(completion_kind); encoded.key(committed.owners[0].step); encoded.block(fingerprint);
+    return encoded.finish();
+}
+
 owner_receipt decode_applied_receipt(bytes_view payload, uint32_t authenticated_rank, const step_key & expected, const limits & bounds) {
     if (authenticated_rank > 2) { throw std::invalid_argument("invalid authenticated receipt rank"); }
     reader encoded(payload, receipt_wire_bytes, receipt_kind);
@@ -191,6 +198,21 @@ commit_acknowledgement decode_committed_ack(const header & authenticated, bytes_
     check_control(authenticated, kind::commit_ack, payload, expected);
     if (authenticated.receiver != 0) { throw std::invalid_argument("commit acknowledgement requires coordinator A"); }
     return decode_commit_ack(payload, authenticated.sender, expected, expected_certificate, bounds);
+}
+
+void decode_commit_completion(const header & authenticated, bytes_view payload, const step_key & expected,
+        const digest & expected_certificate, const limits & bounds) {
+    check_control(authenticated, kind::commit_complete, payload, expected);
+    if (authenticated.sender != 0 || expected_certificate == digest{}) {
+        throw std::invalid_argument("global completion requires coordinator A and a local committed certificate");
+    }
+    reader encoded(payload, completion_wire_bytes, completion_kind);
+    const auto key = encoded.key();
+    digest fingerprint{}; encoded.block(fingerprint); encoded.finish();
+    validate_step(key, bounds);
+    if (!(key == expected) || fingerprint != expected_certificate) {
+        throw std::invalid_argument("global completion differs from the local committed decision");
+    }
 }
 
 } // namespace glm_rpc

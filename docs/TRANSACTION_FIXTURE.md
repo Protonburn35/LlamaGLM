@@ -1,0 +1,38 @@
+# Three-process transaction fixture
+
+The fourth pipeline profile connects actual owned-layer CPU graphs to the owner ledgers, authenticated transaction codecs and coordinator commit barrier. It remains a test worker restricted to the small synthetic F32 model, loopback interfaces, fixed fixture geometry and per-run secret files. It is not a production worker, admission path or serving API.
+
+The independent monolithic oracle uses the existing small 2/1/3 split, context 256, hidden 128, four residual streams, 16 routed experts/all eight selected, microbatch 1 and two CPU threads. A/C stream expert slabs; B preloads its complete 48-slab catalog and policy-2 host tensors/state/workspaces. The harness removes B's private same-basename model copy before A connects. Full working-set admission remains false: metadata/control/network allocations and GPU resources are not protected by this fixture.
+
+Activation data follows A-B-C. Separate authenticated duplex control connections join A-B and A-C. Each control handshake has fresh mutual nonces; forward/reverse keys bind the same handshake to their distinct sender/receiver ranks, channel and identity. Each direction has its own frame sequence. No default credential is embedded. A new process group receives a fresh 16-byte session, credential and explicit generation. All workers use the same canonical model/header/split/source identity.
+
+```mermaid
+sequenceDiagram
+    participant A as A / coordinator
+    participant B as B
+    participant C as C
+    A->>B: four-stream boundary
+    B->>C: four-stream boundary
+    B->>A: authenticated applied receipt
+    C->>A: authenticated applied receipt
+    Note over A: include actual local A receipt; validate full chain
+    A->>B: complete commit decision
+    A->>C: complete commit decision
+    Note over A: commit A locally
+    B->>A: certificate-bound committed ACK
+    C->>A: certificate-bound committed ACK
+    Note over A: require all three distinct committed ACKs
+    A->>B: authenticated global completion
+    A->>C: authenticated global completion
+    Note over A,C: release local diagnostic output only after completion
+```
+
+Each chunk's key binds the complete session/epoch/generation, transaction/chunk/absolute position, rows and SHA256 of its actual little-endian token bytes. B/C independently know those fixture requests; production BEGIN/request provisioning is still absent. Owners prepare before graph execution and mark applied only after successful synchronous decode and hashing actual unfragmented FP32 output bytes. B/C hash their actual received activation bytes. The complete certificate checks every owner and both boundary digest links. C's output fingerprint covers its actual local logits.
+
+A sends decisions only after all applied receipts agree, commits locally, then waits for matching B/C commit ACKs. COMMIT_COMPLETE has envelope kind 15 and a fixed 176-byte kind-4 payload: the usual 16-byte prefix and 128-byte common key followed by the complete canonical decision's 32-byte SHA256. Only A sends it, after commit_barrier::committed() succeeds. A worker decodes it only after its own local commit, matching the complete key and decision fingerprint. Applied ACKs, decisions, committed ACKs and completion notices cannot substitute for each other. Independent Python golden bytes, exact lengths, reserved fields, altered fingerprints and unauthorized roles are tested.
+
+Local diagnostic output files remain empty until a chunk's global completion. The worker retains its current context output without starting another decode while control is pending. Seven committed retries return metadata without another graph call; actual execution/retry counters and identical certificate histories are compared across all three processes. Every boundary and logit byte is checked against the independent oracle over seven uneven chunks/131 tokens. This is diagnostic payload retention, not a bounded production replay cache or a client response protocol.
+
+The failure case makes B commit the first step locally and close without sending its committed ACK. A cannot cross the all-three barrier. A/B/C interrupt their connections, permanently invalidate their quiescent actual contexts and expose no residual/logit getters. All three exit with zero diagnostic output and no completed transaction report. The harness then starts new processes with fresh credentials/session and generation 2, replays from position zero and requires exact oracle output. This reloads owned weights; distributed retained-weight context recreation, replay of prior client-visible history, response/RNG cursors and running-work cancellation remain unimplemented.
+
+The three earlier pipeline profiles and their missing-middle/changed-tokenizer refusal cases remain. Linux passes the full twelve-CTest/seven-GLM gate with the fourth profile, lost-ACK refusal and process-restart replay. The twelve session component suites also pass standalone ASan/UBSan. Exact-source native Windows qualification of this extension is pending. Real model quantization, GPU, physical PCs and full 1M execution remain NOT_RUN.

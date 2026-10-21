@@ -10,6 +10,7 @@
 #include "stage-identity.h"
 #include "stage-boundary.h"
 #include "stage-commit-barrier.h"
+#include "stage-replies.h"
 #include "glm-fixture-lock-quota.h"
 
 #include <nlohmann/json.hpp>
@@ -312,8 +313,13 @@ int main(int argc, char ** argv) {
         std::fflush(stdout);
         erase_secret(psk);
         std::optional<owner_transactions> ledger;
+        std::optional<reply_cache> replies;
         const epoch_stamp stamp{identity,session,generation,generation};
-        if (transactional) { ledger.emplace(rank, identity, bounds); ledger->fresh_context(stamp); }
+        if (transactional) {
+            ledger.emplace(rank, identity, bounds); ledger->fresh_context(stamp);
+            replies.emplace(rank, stamp, bounds, reply_limits{256u<<10,preloaded ? 256u<<10 : 0,3,
+                preloaded ? reply_memory::locked : reply_memory::pageable});
+        }
         json commits = json::array();
         size_t executions = 0, committed_retries = 0;
         size_t position = 0;
@@ -351,7 +357,12 @@ int main(int argc, char ** argv) {
             require(values != nullptr, "owned stage did not return output");
             const size_t bytes = count * (rank == 2 ? 128 : 512) * sizeof(float);
             std::optional<owner_receipt> receipt;
-            if (ledger) { receipt = ledger->applied(step, fingerprint_bytes(values, bytes)); }
+            reply_lease retained;
+            if (ledger) {
+                receipt = ledger->applied(step, fingerprint_bytes(values, bytes));
+                retained = replies->retain_applied(*receipt, {reinterpret_cast<const uint8_t *>(values),bytes});
+                if (preloaded) { retained->verify_locks(); }
+            }
             if (rank < 2) {
                 metadata.sender = rank; metadata.receiver = rank + 1;
                 send_boundary(outgoing, *tx, metadata, bounds, values, count * 512, shortly());
@@ -372,7 +383,9 @@ int main(int argc, char ** argv) {
                     for (uint32_t remote : {1u, 2u}) {
                         send_control(controls[remote], step, kind::commit, 0, remote, {encoded.data(), encoded.size()});
                     }
-                    barrier.record_committed(0, make_commit_ack(ledger->commit(decision), decision, bounds));
+                    const auto local = ledger->commit(decision);
+                    require(replies->commit(decision)->receipt() == local, "A committed reply differs from actual owner state");
+                    barrier.record_committed(0, make_commit_ack(local, decision, bounds));
                     const auto fingerprint = fingerprint_commit(decision, bounds);
                     for (uint32_t remote : {1u, 2u}) {
                         auto & link = controls[remote];
@@ -390,7 +403,9 @@ int main(int argc, char ** argv) {
                     send_control(link, step, kind::state_ack, rank, 0, {encoded.data(), encoded.size()});
                     const auto command = read_frame(link.socket, *link.rx, shortly());
                     decision = decode_commit_decision(command.metadata, {command.payload.data(), command.payload.size()}, step, bounds);
-                    const auto acknowledged = make_commit_ack(ledger->commit(decision), decision, bounds);
+                    const auto local = ledger->commit(decision);
+                    require(replies->commit(decision)->receipt() == local, "committed reply differs from actual owner state");
+                    const auto acknowledged = make_commit_ack(local, decision, bounds);
                     if (drop_ack && chunk == 0) { throw std::runtime_error("injected lost B commit acknowledgement after local commit"); }
                     const auto ack = encode_commit_ack(acknowledged, bounds);
                     send_control(link, step, kind::commit_ack, rank, 0, {ack.data(), ack.size()});
@@ -406,14 +421,19 @@ int main(int argc, char ** argv) {
                 commits.push_back(encoded_hash);
                 require(ledger->prepare(step, input_digest) == step_disposition::committed &&
                         ledger->committed_position() == position + count, "committed retry lost state or requested execution");
+                require(replies->committed_reply(step) == retained &&
+                        fingerprint_bytes(retained->payload().data, retained->payload().size) == receipt->output_digest,
+                        "committed retry lost immutable output bytes");
                 ++committed_retries;
             }
-            output.write(reinterpret_cast<const char *>(values), bytes);
+            const auto output_bytes = retained ? retained->payload() : bytes_view{reinterpret_cast<const uint8_t *>(values),bytes};
+            output.write(reinterpret_cast<const char *>(output_bytes.data), output_bytes.size);
             require(bool(output), "cannot write fixture worker output");
             position += count;
         }
         } catch (...) {
             if (ledger) {
+                replies->invalidate();
                 ledger->invalidate();
                 require(llama_context_stage_invalidate(context.get()) && !llama_get_logits(context.get()) &&
                         !llama_get_embeddings(context.get()), "uncertain fixture context retained output");
@@ -427,9 +447,15 @@ int main(int argc, char ** argv) {
         require(bool(output), "cannot seal fixture worker output");
         report_storage("complete");
         if (ledger) {
+            const auto retained = replies->stats();
+            require(!retained.failures && !retained.refusals && retained.entries == 1 &&
+                    retained.payload_bytes > 0 && retained.peak_payload_bytes <= (256u<<10) &&
+                    retained.peak_page_bytes <= (256u<<10), "worker reply capacity or lifetime accounting failed");
             const json evidence{{"rank",rank}, {"generation",generation}, {"executions",executions},
                 {"committed_retries",committed_retries}, {"committed_position",ledger->committed_position()},
-                {"certificates",commits}, {"full_residency_validated",false}};
+                {"certificates",commits}, {"reply_bytes",retained.payload_bytes}, {"peak_reply_bytes",retained.peak_payload_bytes},
+                {"reply_page_bytes",retained.page_bytes}, {"peak_reply_page_bytes",retained.peak_page_bytes},
+                {"full_residency_validated",false}};
             std::printf("GLM_PIPELINE_TRANSACTIONS %s\n", evidence.dump().c_str());
         }
         llama_stage_bank_report bank{}; bank.version = 1;

@@ -1,4 +1,4 @@
-// TSan's mlock interceptors are no-ops. Keep real kernel locks and residency checks in this standalone harness.
+// Sanitizer mlock interceptors can be no-ops. Keep real kernel locks and residency checks in standalone harnesses.
 #include <cstddef>
 #include <sys/syscall.h>
 #include <unistd.h>

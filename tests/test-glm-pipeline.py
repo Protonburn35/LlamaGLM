@@ -355,10 +355,15 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path) -> None:
                     record = records[0]
                     if not (record["rank"] == worker.rank and record["generation"] == generation and
                             record["executions"] == record["committed_retries"] == 7 and record["committed_position"] == 131 and
+                            0 < record["reply_bytes"] <= record["peak_reply_bytes"] <= 256 << 10 and
+                            (0 < record["reply_page_bytes"] <= record["peak_reply_page_bytes"] <= 256 << 10 if worker.rank == 1 else
+                             record["reply_page_bytes"] == record["peak_reply_page_bytes"] == 0) and
                             record["full_residency_validated"] is False and len(record["certificates"]) == 7 and
                             len(set(record["certificates"])) == 7):
                         raise RuntimeError("worker transaction cursor/retry/certificate evidence differs")
                     certificates.append(record["certificates"])
+                    print(f"REPLY_CACHE_RANK {worker.rank}: payload peak {record['peak_reply_bytes']}; "
+                          f"native page peak {record['peak_reply_page_bytes']}; seven immutable committed retries")
                     owned = [line.split() for line in worker.lines if line.startswith("GLM_PIPELINE_OWNED ")]
                     ends = [2, 3, 6]
                     if len(owned) != 1 or list(map(int, owned[0][1:4])) != [worker.rank, ends[worker.rank-1] if worker.rank else 0, ends[worker.rank]]:

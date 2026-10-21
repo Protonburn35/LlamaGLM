@@ -100,3 +100,12 @@ A single absolute deadline covers the whole send or receive, including post-copy
 The local reservation covers the input float buffer only. Admission must additionally account for one frame (up to 4 MiB), encoder packet/header, actual socket buffers, retained model output and graph state, and concurrent input/output lifetimes. The component has no user-space send queue. Control uses separate connections, as qualified by the earlier backpressure fixture.
 
 Eight local loopback suites include a full 128 MiB boundary over 32 frames, short tails at the final context positions, complete-input barrier, coordinate/interleaving/repeat refusal, truncated/bad-MAC final fragments, local budget refusal and whole-chunk deadlines. The actual model fixture now exercises two-frame chunks with byte-exact results. All eight bridge suites and the fragmented model fixture pass native Windows CPU/CNG at f11238d49 in all three build variants.
+
+
+## Quiescent stage invalidation primitive
+
+llama_context_stage_invalidate is an experimental side-header API for an owner whose in-flight work has already stopped. It idempotently and permanently marks only that stage context failed, suppresses its output views and refuses further evaluation before expert work. Clearing memory cannot revive it; destroy/recreate the context against retained owned weights. Null/ordinary contexts return false. The call is not a running-work interrupt or distributed transaction/reset protocol; a future coordinator must stop/join work, invalidate every affected owner and establish a new epoch/replay before admission.
+
+The local independent model oracle now invalidates A/B/C after valid history (including an already failed C), checks idempotent null outputs and failed retries after memory clearing, and requires unchanged bank materialization/copy counters on rejected retries. It then releases old contexts before allocation, recreates every owner with retained weights and compares the first token's two boundaries/logits against saved independent monolithic outputs. Buffered, streamed and source-deleted locked-host variants pass all seven GLM tests. Ordinary oracle outputs remain usable. Exact-source Windows qualification is pending.
+
+Invalidation suppresses future getter access; callers must discard any previously borrowed output pointers and any uncommitted copies. A local flag cannot retract data already delivered to a peer/client. Production output publication must follow the global commit protocol, which remains unimplemented.

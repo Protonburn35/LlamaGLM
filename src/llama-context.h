@@ -65,6 +65,7 @@ struct llama_context {
     const llama_model   & get_model()   const;
     const llama_cparams & get_cparams() const;
     bool stage_bank_report(llama_stage_bank_report & output) const;
+    bool stage_invalidate();
 
     ggml_backend_sched_t get_sched() const;
 

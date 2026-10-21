@@ -159,6 +159,11 @@ LLAMA_API struct llama_context * llama_init_stage_from_model(
         struct llama_model * model,
         struct llama_context_params params);
 
+// Call on a quiescent stage after stopping in-flight work. Future evaluation/output getters
+// refuse; discard previously borrowed views. Clearing memory cannot revive it; recreate with retained weights.
+// Returns false for null/ordinary contexts. Peer cancellation/epoch coordination is separate.
+LLAMA_API bool llama_context_stage_invalidate(struct llama_context * ctx);
+
 #ifdef __cplusplus
 }
 #endif

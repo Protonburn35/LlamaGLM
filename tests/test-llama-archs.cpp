@@ -770,6 +770,7 @@ static void test_owned_stage_forward(llama_model * reference, const std::array<l
 
     const auto tokens = get_tokens(131, llama_vocab_n_tokens(llama_model_get_vocab(reference)), seed);
     const size_t n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(reference));
+    std::array<std::vector<float>, 3> first_oracle;
     llama_pos position = 0;
     double max_boundary_error = 0, max_logit_error = 0;
     for (const size_t count : {1, 3, 4, 17, 31, 64, 11}) {
@@ -808,6 +809,12 @@ static void test_owned_stage_forward(llama_model * reference, const std::array<l
             max_logit_error = std::max(max_logit_error, stage_compare(llama_get_logits(contexts[2].get()), expected_logits));
         }
         if (position == 0) {
+            size_t rank = 0;
+            for (const auto & model : models) {
+                if (rank < 2) { first_oracle[rank] = boundaries.rows.at("l_out-" + std::to_string(model->stage.layer_ends[rank] - 1)); }
+                else { first_oracle[rank] = expected_logits; }
+                ++rank;
+            }
             // All failures must leave the committed position unchanged for the next valid chunk.
             if (llama_process(contexts[0].get(), LLAMA_PROCESS_TYPE_DECODE, a_batch.get()) == 0) {
                 throw std::runtime_error("stage accepted duplicate positions");
@@ -889,6 +896,46 @@ static void test_owned_stage_forward(llama_model * reference, const std::array<l
     if (llama_get_logits(contexts[2].get()) || llama_get_logits_ith(contexts[2].get(), -1)) {
         throw std::runtime_error("memory clearing re-exposed failed terminal output buffers");
     }
+    if (llama_context_stage_invalidate(nullptr) || llama_context_stage_invalidate(oracle.get()) || !llama_get_logits(oracle.get())) {
+        throw std::runtime_error("explicit stage invalidation changed an ordinary context");
+    }
+    for (size_t rank = 0; rank < 3; ++rank) {
+        llama_stage_bank_report before{}; before.version = 1;
+        const bool bank = llama_context_stage_bank_report(contexts[rank].get(), &before);
+        if (!llama_context_stage_invalidate(contexts[rank].get()) || !llama_context_stage_invalidate(contexts[rank].get()) ||
+                llama_get_embeddings(contexts[rank].get()) || llama_get_embeddings_ith(contexts[rank].get(), -1) ||
+                llama_get_logits(contexts[rank].get()) || llama_get_logits_ith(contexts[rank].get(), -1)) {
+            throw std::runtime_error("explicit stage invalidation retained outputs or was not idempotent");
+        }
+        llama_memory_clear(llama_get_memory(contexts[rank].get()), true);
+        common_batch retry(contexts[rank].get());
+        std::vector<float> residual(width, 0.0f);
+        const llama_pos zero = 0;
+        if (rank == 0) { retry.add(tokens[0], zero, 0, false); }
+        else { retry.add_embd({residual.data(), 1, width}, &zero, 0, rank == 2); }
+        if (llama_process(contexts[rank].get(), LLAMA_PROCESS_TYPE_DECODE, retry.get()) == 0) {
+            throw std::runtime_error("memory clearing revived an explicitly invalidated stage");
+        }
+        llama_stage_bank_report after{}; after.version = 1;
+        if (bank && (!llama_context_stage_bank_report(contexts[rank].get(), &after) ||
+                after.materializations != before.materializations || after.copied_slabs != before.copied_slabs)) {
+            throw std::runtime_error("invalidated stage performed expert bank work on retry");
+        }
+    }
+    for (size_t rank = 0; rank < 3; ++rank) {
+        contexts[rank].reset();
+        contexts[rank].reset(llama_init_stage_from_model(models[rank].get(), params));
+        if (!contexts[rank]) { throw std::runtime_error("cannot recreate invalidated stage with retained weights"); }
+        common_batch input(contexts[rank].get());
+        const llama_pos zero = 0;
+        if (rank == 0) { input.add(tokens[0], zero, 0, false); }
+        else { input.add_embd({llama_get_embeddings(contexts[rank-1].get()), 1, width}, &zero, 0, rank == 2); }
+        if (llama_process(contexts[rank].get(), LLAMA_PROCESS_TYPE_DECODE, input.get())) {
+            throw std::runtime_error("recreated stage could not evaluate against retained weights");
+        }
+        stage_compare(rank == 2 ? llama_get_logits(contexts[rank].get()) : llama_get_embeddings(contexts[rank].get()), first_oracle[rank]);
+    }
+    LOG("Stage invalidation: all three owners reject output/evaluation after memory clearing; retained weights recreate independent-oracle outputs\n");
     LOG("Stage forward: ends %u/%u/%u, 131 tokens, chunks 1/3/4/17/31/64/11, owned FP32 KDA/FP16 MLA+index state, max boundary error %.9g, max logit error %.9g\n",
             models[0]->stage.layer_ends[0], models[0]->stage.layer_ends[1], models[0]->stage.layer_ends[2], max_boundary_error, max_logit_error);
 }

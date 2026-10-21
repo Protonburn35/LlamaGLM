@@ -913,6 +913,12 @@ const llama_model & llama_context::get_model() const {
     return model;
 }
 
+bool llama_context::stage_invalidate() {
+    if (!model.stage_enabled) { return false; }
+    stage_failed = true;
+    return true;
+}
+
 bool llama_context::stage_bank_report(llama_stage_bank_report & output) const {
     if (!stage_experts) { return false; }
     stage_experts->report(output);
@@ -4228,6 +4234,10 @@ static llama_context * llama_init_from_model_impl(
 
 llama_context * llama_init_from_model(llama_model * model, llama_context_params params) {
     return llama_init_from_model_impl(model, params, false);
+}
+
+bool llama_context_stage_invalidate(llama_context * ctx) {
+    return ctx && ctx->stage_invalidate();
 }
 
 llama_context * llama_init_stage_from_model(llama_model * model, llama_context_params params) {

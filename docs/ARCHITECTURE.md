@@ -1,6 +1,6 @@
 # Three-stage GLM architecture
 
-Status: partial implementation. Ownership/planning, owned-weight loading and local owned-layer evaluation exist. Network services do not.
+Status: partial implementation. Ownership/planning, owned-layer evaluation and authenticated transport components exist. A constrained three-process CPU fixture runs actual A/B/C layer work; production network services do not.
 
 The initial plan is A [0,22), B [22,27), C [27,45). A owns token embeddings and future matching GLM5V preprocessing; C owns final mHC collapse, normalization, output head and optional one-block NextN. The planner rejects empty stages, gaps, overlap, missing coverage and unknown global tensors. NextN block 45 is distinct from target layers 0 through 44. Split counts are configurable and must cover the complete target model.
 
@@ -15,5 +15,7 @@ The experimental C interface in `include/llama-stage.h` now loads only the selec
 `llama_init_stage_from_model` is a narrow append-only baseline: one sequence (ID 0), consecutive absolute positions within capacity, causal decoding, FP16 MLA/index cache and source FP32 KDA state. Its defaults select the full model context, bounded at 1,048,576. B/C reject token input. MTP, rollback, backend samplers, pooling, noncausal encode and cross-layer shared index selections are refused. Invalid input/settings are rejected before memory preparation. Once memory preparation/computation fails, that context permanently refuses further decoding, even after a memory clear; recreate it against the retained model. A distributed controller must reset/replay every owner together. This is not a distributed transaction implementation.
 
 Persistent native Windows processes will form A -> B -> C, with a separate bounded authenticated control path to avoid cancellation starvation. C samples; A emits only globally committed output. One active request is sufficient. Startup must require all three matching, capable stages. Future desktop weight providers may stream local SSD experts; B's inference provider must have no SSD fallback and must refuse admission unless all required weights/state have a proven residency policy.
+
+The new CPU pipeline fixture demonstrates this compute chain with three separate processes and a six-layer model. It compares both four-stream boundaries and all C logits against a separate monolithic oracle, verifies exact aggregate weight ownership and refuses direct A-to-C startup without B. The fixture is loopback-only with a per-run temporary secret, fixed small geometry and single-frame chunks; it is not the production worker/coordinator or a residency proof. Real model identity, resource admission, control/session commits and serving still need integration.
 
 Speculation remains off until full-target A/B/C verification and rollback are tested. The existing monolithic MTP implementation is a source reference, not evidence of distributed MTP. Vision, prefix reuse, cancellation and three-stage snapshots likewise require new integration and validation.

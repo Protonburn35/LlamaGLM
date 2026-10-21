@@ -16,4 +16,13 @@ if (LLAMA_BUILD_TESTS)
     target_link_libraries(test-glm-net PRIVATE llama-glm-wire Threads::Threads)
     add_test(NAME test-glm-net COMMAND test-glm-net)
     set_tests_properties(test-glm-net PROPERTIES TIMEOUT 60)
+    add_executable(test-glm-pipeline-worker ${PROJECT_SOURCE_DIR}/tests/test-glm-pipeline-worker.cpp)
+    target_link_libraries(test-glm-pipeline-worker PRIVATE llama-glm-wire llama-common vendor::nlohmann)
+    if (TARGET test-llama-archs)
+        find_package(Python3 COMPONENTS Interpreter REQUIRED)
+        add_test(NAME test-glm-pipeline COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/tests/test-glm-pipeline.py
+            --oracle $<TARGET_FILE:test-llama-archs> --worker $<TARGET_FILE:test-glm-pipeline-worker>)
+        set_tests_properties(test-glm-pipeline PROPERTIES TIMEOUT 180)
+    endif()
 endif()

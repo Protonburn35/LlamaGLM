@@ -2,11 +2,11 @@
 
 | Capability | Status | Evidence/limit |
 | --- | --- | --- |
-| Source | PARTIAL | Planner, owned-layer evaluator, authenticated TCP components; no distributed executor |
-| Local CPU fixtures | CPU_FIXTURE_PASS | 5 CTest targets (8 planner cases, 12 wire/auth and 8 TCP suites); 3 GLM tests; 2 non-GLM regression tests |
+| Source | PARTIAL | Planner, owned-layer evaluator, authenticated TCP and test-only three-process workers; no production coordinator |
+| Local CPU fixtures | CPU_FIXTURE_PASS | 6 CTest targets (8 planner cases, 12 wire/auth and 8 TCP suites, three-process/missing-middle cases); 3 GLM tests; 2 non-GLM tests |
 | Real tensor descriptors | PASS | 1,412 descriptors across all four pinned headers; no tensor data loaded |
-| Windows compile | WINDOWS_COMPILE_PASS (CPU/SM89/SM120a) | 79d638759, run 39521399397: 4 CTest targets (12 CNG wire/auth suites), 3 GLM CPU tests; newer TCP source awaits its own run |
-| Three-process TCP | THREE_PROCESS_TCP_NOT_RUN | Transport not implemented |
+| Windows compile | WINDOWS_COMPILE_PASS (CPU/SM89/SM120a) | 52d499a2e, run 39523023466: 5 CTest targets (including Winsock), 3 GLM CPU tests; newer pipeline fixture awaits its own run |
+| Three-process TCP | THREE_PROCESS_CPU_FIXTURE_PASS | Actual A/B/C CPU processes, six synthetic layers, 131 tokens; GCC boundaries/logits byte-exact; Windows pending |
 | Ada GPU | SM89_GPU_NOT_RUN | No physical GPU tests |
 | Blackwell GPU | SM120_GPU_NOT_RUN | No physical GPU tests |
 | Three-PC full model | THREE_PC_FULL_MODEL_NOT_RUN | No weights or inference PCs used |
@@ -15,7 +15,7 @@
 Local commands after a CPU CMake build:
 
 ```sh
-ctest --test-dir build -R '^(test-glm-stage|test-glm-plan|test-glm-wire|test-glm-net|test-gguf)$' --output-on-failure
+ctest --test-dir build -R '^(test-glm-stage|test-glm-plan|test-glm-wire|test-glm-net|test-glm-pipeline|test-gguf)$' --output-on-failure
 build/bin/test-llama-archs --arch glm5-next --backend CPU --seed 53 -v 5
 ```
 
@@ -23,7 +23,11 @@ Require a nonzero completed-test summary from the architecture runner. A zero ex
 
 Wire/auth tests require `-DLLAMA_GLM_RPC=ON`. Twelve component suites exercise an RFC 4231 HMAC vector, independent Python-derived key/header/MAC/challenge vectors, every frame/handshake envelope byte and selected payload corruptions, wrong identity/direction/channel/key, replay/skipped frame and handshake rejection, fatal invalidation, forged lengths/counts before payload allocation, control/data separation and a 128 MiB logical boundary processed in bounded 4 MiB fragments. Local backend: OpenSSL 3.5.7; all twelve suites also pass native Windows CNG at 79d638759. These are byte-component tests without fragment reassembly, model execution or distributed transaction semantics.
 
-Eight additional TCP suites pass on local Linux with actual loopback sockets in one process: fresh mutual proof, bit-preserving 4 MiB/64 KiB two-way fragments, cancel acknowledgement on an independent control socket while data is backpressured, deadline/EOF permanent shutdown, wrong secret refusal, malformed lengths rejected without reading a body, explicit interface/port conflict and concurrent read/listener interruption. Windows Winsock qualification is pending for this new source. No model executes in these network tests; they are not three-process validation.
+Eight additional TCP suites pass on local Linux and native Windows Winsock at 52d499a2e with actual loopback sockets in one process: fresh mutual proof, bit-preserving 4 MiB/64 KiB two-way fragments, cancel acknowledgement on an independent control socket while data is backpressured, deadline/EOF permanent shutdown, wrong secret refusal, malformed lengths rejected without reading a body, explicit interface/port conflict and concurrent read/listener interruption. No model executes in these component tests.
+
+The separate test-glm-pipeline now launches three distinct native CPU worker processes. Each loads only its own layers through the stage loader (2/2/2), owns its own recurrent/MLA/index state, and computes actual graph work. A sends all four FP32 streams to B, B computes and forwards to C, and C runs the final head. A separate monolithic generator process writes both reference boundaries and all logits before workers start. For 131 tokens over seven uneven chunks, both boundaries and logits are byte-exact under GCC 14.2 (maximum error 0). The independent reference tensor-byte total equals the sum of all three reported stage payloads. Direct A-to-C startup with B absent refuses before any inference output. Native Windows qualification of this new fixture is pending.
+
+The worker binary is test-only, loopback-only, requires a fresh per-run secret file from the harness, and refuses models without the small six-layer fixture marker/geometry. No worker credential default is embedded or logged. It creates no user service. The generated 80 MiB F32 GGUF and references are temporary synthetic data, not downloaded real weights. Context is 256, not 1M. Production identity/credential provisioning, multi-fragment execution, HTTP/sampling, session transactions, cancellation/rollback, residency and SSD tiers remain absent. These results must not be presented as physical three-PC/full-quant/GPU validation.
 
 Owned-loader qualification uses a synthetic six-layer GLM fixture with small dimensions. It verifies exact rank tensor sets, byte-for-byte provider/file payload equality, owned byte counters, invalid plans/modes, refusal of ordinary context creation/export, and closure of file handles. The source GGUF is removed after use. The experimental side header compiles as C and exports unmangled model/context symbols in the shared library.
 

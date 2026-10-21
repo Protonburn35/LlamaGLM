@@ -22,6 +22,7 @@
 #include <cstring>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <set>
 #include <random>
@@ -142,6 +143,7 @@ static void usage(char ** argv) {
     LOG("  -o, --out <dir>          Save generated test models to <dir> instead of running backend tests\n");
     LOG("  -v <N>                   Set log verbosity level\n");
     LOG("  -b, --backend <backend>  Run only on the given backend device\n");
+    LOG("      --glm-pipeline-fixture <dir>  Write a small GLM model and separate monolithic CPU oracle\n");
     LOG("  -h, --help               Show this help message\n\n");
     LOG("Examples:\n");
     LOG("  %s\n", argv[0]);
@@ -812,14 +814,94 @@ static void test_owned_stage_forward(llama_model * reference, const std::array<l
             models[0]->stage.layer_ends[0], models[0]->stage.layer_ends[1], models[0]->stage.layer_ends[2], max_boundary_error, max_logit_error);
 }
 
-static void test_owned_stage_loading(const size_t seed, const float stdev) {
+static gguf_context_ptr glm_stage_fixture_metadata() {
     auto metadata = get_gguf_ctx(LLM_ARCH_GLM5_NEXT, true);
+    gguf_set_val_str(metadata.get(), "general.name", "LlamaGLM synthetic stage fixture v1");
     gguf_set_val_u32(metadata.get(), "glm5-next.block_count", 6);
     gguf_set_val_u32(metadata.get(), "glm5-next.expert_count", 16);
     gguf_set_val_u32(metadata.get(), "glm5-next.expert_used_count", 8);
     gguf_set_val_u32(metadata.get(), "glm5-next.attention.indexer.top_k", 8);
     const uint32_t heads[6] = {0, 1, 0, 1, 0, 1};
     gguf_set_arr_data(metadata.get(), "glm5-next.attention.head_count_kv", GGUF_TYPE_UINT32, heads, 6);
+    return metadata;
+}
+
+static int write_glm_pipeline_fixture(const std::string & directory, size_t seed, float stdev, int verbosity) {
+    common_log_set_verbosity_thold(verbosity);
+    const uint32_t byte_order = 1;
+    if (*reinterpret_cast<const uint8_t *>(&byte_order) != 1) { throw std::runtime_error("fixture files require a little-endian host"); }
+    const std::filesystem::path path(directory);
+    std::filesystem::create_directories(path);
+    if (!std::filesystem::is_empty(path)) { throw std::runtime_error("pipeline fixture directory must be empty"); }
+    auto metadata = glm_stage_fixture_metadata();
+    tensor_data_params data{seed, stdev};
+    llama_model_params model_params = llama_model_default_params();
+    ggml_backend_dev_t cpu_only[] = {nullptr};
+    model_params.devices = cpu_only;
+    model_params.n_gpu_layers = 0;
+    model_params.load_mode = LLAMA_LOAD_MODE_NONE;
+    model_params.lazy_mode = LLAMA_LAZY_MODE_OFF;
+    model_params.progress_callback = silent_model_load_progress;
+    llama_model_ptr model(llama_model_init_from_user(metadata.get(), set_tensor_data, &data, model_params));
+    if (!model) { throw std::runtime_error("cannot create pipeline oracle model"); }
+    llama_model_save_to_file(model.get(), (path / "model.gguf").string().c_str());
+    if (!std::filesystem::is_regular_file(path / "model.gguf")) { throw std::runtime_error("pipeline model was not written"); }
+    stage_boundaries boundaries;
+    boundaries.rows.emplace("l_out-1", std::vector<float>{});
+    boundaries.rows.emplace("l_out-3", std::vector<float>{});
+    auto params = llama_stage_context_default_params();
+    params.n_batch = 64;
+    params.n_ubatch = 32;
+    params.n_threads = params.n_threads_batch = 2;
+    params.offload_kqv = false;
+    params.op_offload = false;
+    params.cb_eval = stage_boundaries::capture;
+    params.cb_eval_user_data = &boundaries;
+    llama_context_ptr oracle(llama_init_from_model(model.get(), params));
+    if (!oracle) { throw std::runtime_error("cannot create monolithic pipeline oracle"); }
+    const auto tokens = get_tokens(131, llama_vocab_n_tokens(llama_model_get_vocab(model.get())), seed);
+    const std::array<size_t, 7> chunks{{1, 3, 4, 17, 31, 64, 11}};
+    uint64_t payload_bytes = 0;
+    for (const auto & tensor : model->tensors_by_name) { payload_bytes += ggml_nbytes(tensor.second); }
+    if (!payload_bytes || payload_bytes > (128ull << 20)) { throw std::runtime_error("invalid oracle payload byte inventory"); }
+    std::ofstream requests(path / "requests.json");
+    requests << "{\"version\":1,\"context\":256,\"hidden\":128,\"vocab\":128,\"model_payload_bytes\":" << payload_bytes
+             << ",\"chunks\":[1,3,4,17,31,64,11],\"tokens\":[";
+    for (size_t i = 0; i < tokens.size(); ++i) { requests << (i ? "," : "") << tokens[i]; }
+    requests << "]}\n";
+    requests.close();
+    if (!requests) { throw std::runtime_error("cannot write pipeline requests"); }
+    std::array<std::ofstream, 3> outputs;
+    for (size_t rank = 0; rank < 3; ++rank) {
+        outputs[rank].open(path / ("oracle-" + std::to_string(rank) + ".f32le"), std::ios::binary);
+    }
+    size_t position = 0;
+    for (const auto count : chunks) {
+        for (auto & entry : boundaries.rows) { entry.second.clear(); }
+        common_batch batch(oracle.get());
+        for (size_t row = 0; row < count; ++row) { batch.add(tokens.at(position + row), position + row, 0, true); }
+        if (llama_process(oracle.get(), LLAMA_PROCESS_TYPE_DECODE, batch.get())) { throw std::runtime_error("pipeline oracle decode failed"); }
+        const auto * logits = llama_get_logits(oracle.get());
+        if (!logits) { throw std::runtime_error("pipeline oracle logits missing"); }
+        for (size_t rank = 0; rank < 2; ++rank) {
+            const auto & values = boundaries.rows.at(rank == 0 ? "l_out-1" : "l_out-3");
+            if (values.size() != count * 512) { throw std::runtime_error("pipeline oracle boundary capture incomplete"); }
+            outputs[rank].write(reinterpret_cast<const char *>(values.data()), values.size() * sizeof(float));
+        }
+        outputs[2].write(reinterpret_cast<const char *>(logits), count * 128 * sizeof(float));
+        position += count;
+    }
+    for (auto & output : outputs) {
+        output.close();
+        if (!output) { throw std::runtime_error("cannot write pipeline oracle outputs"); }
+    }
+    std::puts("GLM pipeline oracle: synthetic six-layer model, 131 tokens, two independent boundaries and logits written");
+    common_log_flush(common_log_main());
+    return 0;
+}
+
+static void test_owned_stage_loading(const size_t seed, const float stdev) {
+    auto metadata = glm_stage_fixture_metadata();
     tensor_data_params data{seed, stdev};
     llama_model_params params = llama_model_default_params();
     ggml_backend_dev_t cpu_only[] = {nullptr};
@@ -1529,6 +1611,7 @@ int main(int argc, char ** argv) {
     size_t seed = rd();
     float stdev = 0.1f;
     std::string out;
+    std::string pipeline_fixture;
     const char * target_backend = nullptr;
 
     int verbosity = LOG_LEVEL_ERROR;
@@ -1584,6 +1667,9 @@ int main(int argc, char ** argv) {
                 usage(argv);
                 return 1;
             }
+        } else if (strcmp(argv[i], "--glm-pipeline-fixture") == 0) {
+            if (i + 1 == argc || argv[i + 1][0] == '\0') { usage(argv); return 1; }
+            pipeline_fixture = argv[++i];
         } else if (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--backend") == 0) {
             if (i + 1 < argc) {
                 const char * backend_name = argv[++i];
@@ -1610,6 +1696,10 @@ int main(int argc, char ** argv) {
     LOG_INF("%s: using seed %zu, stdev %f\n", __func__, seed, stdev);
 
     try {
+        if (!pipeline_fixture.empty()) {
+            if (!out.empty() || !arch_filter.empty() || target_backend) { throw std::invalid_argument("pipeline fixture generation is a separate CPU mode"); }
+            return write_glm_pipeline_fixture(pipeline_fixture, seed, stdev, verbosity);
+        }
         if (!out.empty()) {
             return save_models(arch_filter, seed, stdev, verbosity, out);
         }

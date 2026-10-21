@@ -2,7 +2,7 @@
 
 This fork is developing a native Windows 11 pipeline for the exact Unsloth GLM-5.3-Flash UD-IQ3_XXS model across a 4090, a resident-only 4060 laptop stage and a 5070 Ti. The initial ownership plan is 22 / 5 / 18 target layers, full 1,048,576-token context, FP16 sparse caches and FP32 stage transport.
 
-**Current status: partial development, not an inference release.** `llama-glm-plan` inventories published quant metadata without loading weights. A small synthetic CPU fixture now runs three actual owned-layer processes over authenticated TCP and matches an independent monolithic oracle. Production three-PC coordination, residency guarantees and distributed serving are not implemented yet. The inherited `llama-server` is monolithic. Real-model hardware fit and speed are unverified.
+**Current status: partial development, not an inference release.** `llama-glm-plan --validate-schema` checks the complete published tensor schema against the native loader without loading weights. A small synthetic CPU fixture now runs three actual owned-layer processes over authenticated TCP and matches an independent monolithic oracle. Production three-PC coordination, residency guarantees and distributed serving are not implemented yet. The inherited `llama-server` is monolithic. Real-model hardware fit and speed are unverified.
 
 Start with [HANDOFF.md](HANDOFF.md), [the memory ledger](docs/MEMORY_PLAN.md), [test status](docs/TEST_REPORT.md) and [open work](docs/OPEN_ISSUES.md). Native Windows CPU/CUDA builds are defined in `.github/workflows/glm-windows.yml`; no full model is downloaded to CI. The original upstream README follows.
 

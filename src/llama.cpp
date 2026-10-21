@@ -315,10 +315,10 @@ static bool llama_prepare_model_devices(const llama_model_params & params, llama
 // Returns 0 on success, -1 on error, and -2 on cancellation via llama_progress_callback
 static std::pair<int, llama_model *> llama_model_load(struct gguf_context * metadata, llama_model_set_tensor_data_t set_tensor_data, void * set_tensor_data_ud,
         const std::string & fname, std::vector<std::string> & splits, FILE * file, llama_model_params & params,
-        const llama_stage_model_params * stage) {
+        const llama_stage_model_params * stage, bool strict_metadata = false) {
     try {
         llama_model_loader ml(metadata, set_tensor_data, set_tensor_data_ud, fname, splits, file, params.load_mode,
-            params.check_tensors, params.no_alloc, params.load_mtp, params.kv_overrides, params.tensor_buft_overrides);
+            params.check_tensors, params.no_alloc, params.load_mtp, params.kv_overrides, params.tensor_buft_overrides, strict_metadata);
 
         ml.lazy.mode = params.lazy_mode;
 
@@ -382,6 +382,147 @@ static std::pair<int, llama_model *> llama_model_load(struct gguf_context * meta
     } catch (const std::exception & err) {
         LLAMA_LOG_ERROR("%s: error loading model: %s\n", __func__, err.what());
         return {-1, nullptr};
+    }
+}
+
+static void llama_check_stage_metadata_limits(const gguf_context * metadata) {
+    const int64_t arch = gguf_find_key(metadata, "general.architecture");
+    if (arch < 0 || gguf_get_kv_type(metadata, arch) != GGUF_TYPE_STRING ||
+            std::strcmp(gguf_get_val_str(metadata, arch), "glm5-next") != 0 || gguf_get_n_kv(metadata) > 10000 ||
+            gguf_get_n_tensors(metadata) <= 0 || gguf_get_n_tensors(metadata) > 100000) {
+        throw std::invalid_argument("schema check requires bounded complete GLM5Next metadata");
+    }
+    const auto integer = [&](const char * suffix, uint32_t low, uint32_t high, bool required = true) {
+        const std::string key = std::string("glm5-next.") + suffix;
+        const int64_t id = gguf_find_key(metadata, key.c_str());
+        if (id < 0 && !required) { return uint32_t(0); }
+        if (id < 0 || gguf_get_kv_type(metadata, id) != GGUF_TYPE_UINT32) { throw std::invalid_argument("invalid schema geometry field: " + key); }
+        const uint32_t value = gguf_get_val_u32(metadata, id);
+        if (value < low || value > high) { throw std::invalid_argument("schema geometry field exceeds limits: " + key); }
+        return value;
+    };
+    const uint32_t layers = integer("block_count", 1, 256);
+    integer("nextn_predict_layers", 0, layers - 1, false);
+    integer("embedding_length", 1, 65536);
+    integer("attention.head_count", 1, 1024);
+    integer("context_length", 1, 1048576);
+    integer("hyper_connection.count", 4, 4);
+    integer("hyper_connection.sinkhorn_iterations", 1, 128);
+    integer("ssm.conv_kernel", 1, 64);
+    integer("kda.head_dim", 1, 1024);
+    integer("attention.key_length_mla", 1, 65536);
+    integer("attention.value_length_mla", 1, 65536);
+    integer("attention.q_lora_rank", 1, 65536);
+    integer("attention.kv_lora_rank", 1, 65536);
+    integer("attention.indexer.head_count", 1, 1024);
+    integer("attention.indexer.key_length", 1, 1024);
+    const uint32_t pool = integer("attention.indexer.kpool", 2, 64);
+    if (integer("attention.indexer.top_k", 1, 1048576) % pool) { throw std::invalid_argument("schema index top-k must cover complete pools"); }
+    const uint32_t experts = integer("expert_count", 1, 512);
+    integer("expert_used_count", 1, experts);
+    const uint32_t groups = integer("expert_group_count", 0, experts - 1, false);
+    const uint32_t groups_used = integer("expert_group_used_count", 0, experts, false);
+    if (groups > 1 && (experts % groups || groups_used == 0 || groups_used >= groups)) {
+        throw std::invalid_argument("invalid schema expert grouping");
+    }
+    integer("expert_shared_count", 1, 512);
+    integer("leading_dense_block_count", 0, layers, false);
+    integer("vocab_size", 1, 1048576, false);
+    const auto choice = [&](const char * suffix, std::initializer_list<const char *> values) {
+        const std::string key = std::string("glm5-next.") + suffix;
+        const int64_t id = gguf_find_key(metadata, key.c_str());
+        if (id < 0) { return; }
+        if (gguf_get_kv_type(metadata, id) == GGUF_TYPE_STRING) {
+            for (const char * value : values) {
+                if (std::strcmp(gguf_get_val_str(metadata, id), value) == 0) { return; }
+            }
+        }
+        throw std::invalid_argument("unsupported schema geometry choice: " + key);
+    };
+    choice("rope.scaling.type", {"none", "linear", "yarn", "longrope"});
+    choice("classifier.activation", {"gelu", "silu", "tanh"});
+    const auto array_field = [&](const char * suffix, uint32_t maximum, bool scalar) {
+        const std::string key = std::string("glm5-next.") + suffix;
+        const int64_t id = gguf_find_key(metadata, key.c_str());
+        if (id < 0) { throw std::invalid_argument("missing schema geometry field: " + key); }
+        if (scalar && gguf_get_kv_type(metadata, id) == GGUF_TYPE_UINT32) {
+            if (gguf_get_val_u32(metadata, id) > maximum) { throw std::invalid_argument("schema geometry scalar exceeds limit"); }
+            return;
+        }
+        if (gguf_get_kv_type(metadata, id) != GGUF_TYPE_ARRAY || gguf_get_arr_n(metadata, id) != layers ||
+                (gguf_get_arr_type(metadata, id) != GGUF_TYPE_UINT32 && gguf_get_arr_type(metadata, id) != GGUF_TYPE_INT32)) {
+            throw std::invalid_argument("invalid schema geometry array: " + key);
+        }
+        for (uint32_t i = 0; i < layers; ++i) {
+            const void * data = gguf_get_arr_data(metadata, id);
+            const int64_t value = gguf_get_arr_type(metadata, id) == GGUF_TYPE_UINT32 ?
+                int64_t(static_cast<const uint32_t *>(data)[i]) : int64_t(static_cast<const int32_t *>(data)[i]);
+            if (value < 0 || uint64_t(value) > maximum) { throw std::invalid_argument("schema geometry array exceeds limit"); }
+        }
+    };
+    array_field("attention.head_count_kv", 1, false);
+    array_field("feed_forward_length", 1048576, true);
+    array_field("expert_feed_forward_length", 1048576, true);
+    const int64_t tokens = gguf_find_key(metadata, "tokenizer.ggml.tokens");
+    if (tokens >= 0 && (gguf_get_kv_type(metadata, tokens) != GGUF_TYPE_ARRAY ||
+            gguf_get_arr_type(metadata, tokens) != GGUF_TYPE_STRING || gguf_get_arr_n(metadata, tokens) > 1048576)) {
+        throw std::invalid_argument("schema vocabulary exceeds metadata limits");
+    }
+    uint64_t total = 0;
+    for (int64_t i = 0; i < gguf_get_n_tensors(metadata); ++i) {
+        const auto type = gguf_get_tensor_type(metadata, i);
+        if (type < 0 || type >= GGML_TYPE_COUNT || ggml_blck_size(type) <= 0 || ggml_type_size(type) == 0) {
+            throw std::invalid_argument("invalid schema tensor type");
+        }
+        const auto * ne = gguf_get_tensor_ne(metadata, i);
+        uint64_t bytes = ggml_type_size(type);
+        for (size_t dim = 0; dim < GGML_MAX_DIMS; ++dim) {
+            if (ne[dim] <= 0 || ne[dim] > (1 << 24) || (dim == 0 && ne[dim] % ggml_blck_size(type))) {
+                throw std::invalid_argument("invalid schema tensor dimension");
+            }
+            const uint64_t factor = dim == 0 ? ne[dim] / ggml_blck_size(type) : ne[dim];
+            if (bytes > (1ull << 40) / factor) { throw std::invalid_argument("schema tensor exceeds byte limit"); }
+            bytes *= factor;
+        }
+        if (total > (1ull << 44) - bytes) { throw std::invalid_argument("schema tensor inventory exceeds byte limit"); }
+        total += bytes;
+    }
+}
+
+bool llama_model_validate_stage_schema(gguf_context * metadata, llama_stage_schema_report * report) {
+    if (!metadata || !report || report->version != 1) {
+        LLAMA_LOG_ERROR("%s: complete metadata and a version-1 report are required\n", __func__);
+        return false;
+    }
+    *report = {1, 0, 0, 0, 0};
+    try {
+        llama_check_stage_metadata_limits(metadata);
+        auto params = llama_model_default_params();
+        ggml_backend_dev_t cpu_only[] = {nullptr};
+        params.devices = cpu_only;
+        params.n_gpu_layers = 0;
+        params.load_mode = LLAMA_LOAD_MODE_NONE;
+        params.lazy_mode = LLAMA_LAZY_MODE_OFF;
+        params.no_alloc = true;
+        params.load_mtp = true;
+        params.use_extra_bufts = false;
+        params.progress_callback = nullptr;
+        std::vector<std::string> splits;
+        const auto loaded = llama_model_load(metadata, nullptr, nullptr, "", splits, nullptr, params, nullptr, true);
+        std::unique_ptr<llama_model> model(loaded.second);
+        if (loaded.first != 0 || !model) { return false; }
+        uint64_t bytes = 0;
+        for (const auto & entry : model->tensors_by_name) {
+            if (entry.second->data || !entry.second->buffer || ggml_backend_buffer_get_size(entry.second->buffer) != 0) {
+                throw std::runtime_error("schema inspection unexpectedly allocated weight data");
+            }
+            bytes += ggml_nbytes(entry.second);
+        }
+        *report = {1, uint32_t(model->tensors_by_name.size()), model->hparams.n_layer(), model->hparams.n_layer_nextn, bytes};
+        return true;
+    } catch (const std::exception & error) {
+        LLAMA_LOG_ERROR("%s: schema refused: %s\n", __func__, error.what());
+        return false;
     }
 }
 

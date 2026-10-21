@@ -8,6 +8,9 @@
   "boundary_bytes_per_token": 65536,
   "admission": "NOT_VALIDATED",
   "tensor_payloads_verified": false,
+  "native_tensor_schema": "VALIDATED",
+  "schema_checked_tensors": 1412,
+  "schema_weight_allocation_bytes": 0,
   "limitations": [
     "Metadata inventory only; no model tensor payload is read.",
     "State bytes exclude allocator overhead, cache bookkeeping, scratch, graphs, OS, display and queues.",

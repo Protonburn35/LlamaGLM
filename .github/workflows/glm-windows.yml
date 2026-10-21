@@ -117,8 +117,15 @@ jobs:
           python scripts/glm-fetch-metadata.py "$env:RUNNER_TEMP/glm-headers"
           if ($LASTEXITCODE -ne 0) { throw 'Metadata fetch failed' }
           $Headers = @(Get-ChildItem "$env:RUNNER_TEMP/glm-headers/*.header" | Sort-Object Name | ForEach-Object { $_.FullName })
-          ./build/bin/llama-glm-plan.exe --output glm-memory-manifest.json @Headers
+          ./build/bin/llama-glm-plan.exe --validate-schema --output glm-memory-manifest.json @Headers
           if ($LASTEXITCODE -ne 0) { throw 'Quant inventory failed' }
+          $Manifest = Get-Content glm-memory-manifest.json -Raw | ConvertFrom-Json
+          if ($Manifest.native_tensor_schema -ne 'VALIDATED' -or $Manifest.schema_checked_tensors -ne 1412 -or $Manifest.schema_weight_allocation_bytes -ne 0) {
+            throw 'Native tensor schema was not validated without weight allocation'
+          }
+          if ($Manifest.admission -ne 'NOT_VALIDATED' -or $Manifest.tensor_payloads_verified) {
+            throw 'Metadata audit must not claim runtime admission or payload verification'
+          }
       - name: Record exact build identity and executable behavior
         shell: pwsh
         run: |

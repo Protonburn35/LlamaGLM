@@ -3,8 +3,8 @@
 | Capability | Status | Evidence/limit |
 | --- | --- | --- |
 | Source | PARTIAL | Planner, owned-layer evaluator, authenticated TCP and test-only three-process workers; no production coordinator |
-| Local CPU fixtures | CPU_FIXTURE_PASS | 6 CTest targets (8 planner cases, 12 wire/auth and 8 TCP suites, three-process/missing-middle cases); 3 GLM tests; 2 non-GLM tests |
-| Real tensor descriptors | PASS | 1,412 descriptors across all four pinned headers; no tensor data loaded |
+| Local CPU fixtures | CPU_FIXTURE_PASS | 6 CTest targets (9 planner cases, 12 wire/auth and 8 TCP suites, three-process/missing-middle cases); 4 GLM tests; 2 non-GLM tests |
+| Real tensor descriptors | NATIVE_SCHEMA_LOCAL_PASS | All 1,412 descriptors and 120,358,051,192 logical bytes match native GLM/NextN tensor definitions; zero weight allocation/read; Windows checker result pending |
 | Windows compile | WINDOWS_COMPILE_PASS (CPU/SM89/SM120a) | e5a94c203, run 39526159488: 6 CTest targets including three-process inference, 3 GLM CPU tests |
 | Three-process TCP | THREE_PROCESS_CPU_FIXTURE_PASS | Actual A/B/C CPU processes, six synthetic layers, 131 tokens; GCC/MSVC boundaries/logits byte-exact |
 | Ada GPU | SM89_GPU_NOT_RUN | No physical GPU tests |
@@ -38,3 +38,5 @@ The same stage fixture passes native MSVC CPU in CPU and CUDA-linked Windows bui
 No target-model logits, full-context allocations, GPU residency, timing or tokens/sec measurements exist. Windows Actions will compile native application targets and run CPU fixtures; hosted runners do not prove NVIDIA inference correctness.
 
 The planner integration cases construct tiny metadata-only GGUF files describing large tensors without allocating those payloads. They cover valid signed/unsigned schedules, middle-stage missing projections, incorrect expert counts, truncated headers, invalid splits, excessive counts and context refusal. Temporary paths include spaces to exercise native argument quoting on Windows. The fixtures are structural, not quant-codec or inference tests.
+
+Native schema validation uses a guarded descriptor-only loader mode: complete actual descriptors populate the ordinary native shape/count checks, rather than the synthetic provider path that creates expected tensors. The report checks every weight buffer is zero-sized and has no data. The six-layer fixture verifies the exact independent byte inventory and refuses nine cases: missing norm, wrong norm width, unknown tensor, invalid mHC stream count, missing KDA projection, missing DSA projection, invalid expert grouping, unknown rope scaling and unknown classifier activation. The planner also refuses an FFN-only structural fixture when native validation is requested. C header syntax and unmangled export checks pass locally. No payload bytes, GPU/cache allocations, residency or model integrity are established by this check.

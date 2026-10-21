@@ -14,6 +14,20 @@ struct llama_stage_model_params {
     uint32_t layer_ends[3];  // exclusive ends of three nonempty contiguous target ranges
 };
 
+struct llama_stage_schema_report {
+    uint32_t version; // caller must initialize to 1
+    uint32_t tensors;
+    uint32_t target_layers;
+    uint32_t nextn_layers;
+    uint64_t payload_bytes; // logical bytes only; no payload is allocated or read
+};
+
+// Validate a complete GLM5Next descriptor table, including declared NextN, against the native loader.
+// Uses metadata and zero-sized weight buffers only. Does not verify payloads, identity or residency.
+LLAMA_API bool llama_model_validate_stage_schema(
+        struct gguf_context * metadata,
+        struct llama_stage_schema_report * report);
+
 // GLM5Next only; params.load_mode must be NONE (buffered), lazy_mode OFF, load_mtp/vocab_only false.
 // Loads owned tensors into ordinary buffers. This does not establish Windows residency.
 // Use llama_init_stage_from_model; ordinary context creation/model saving refuse partial models.

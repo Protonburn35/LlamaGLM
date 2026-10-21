@@ -75,6 +75,7 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(manifest["stages"][1]["mla_cache_bytes"], 1073741824)
         self.assertEqual(manifest["stages"][1]["index_cache_bytes"], 805306368)
         self.assertEqual(manifest["admission"], "NOT_VALIDATED")
+        self.assertEqual(manifest["native_tensor_schema"], "NOT_VALIDATED")
         self.assertFalse(manifest["tensor_payloads_verified"])
         expert = next(t for t in manifest["tensors"] if t["name"] == "blk.23.ffn_up_exps.weight")
         self.assertEqual(expert["rank"], 1)
@@ -83,6 +84,12 @@ class PlannerTests(unittest.TestCase):
     def test_unsigned_head_schedule(self) -> None:
         result = self.run_planner(fixture(kv_type=4))
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_native_schema_refuses_ffn_only_fixture(self) -> None:
+        result = self.run_planner(fixture(), "--validate-schema")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("native GLM tensor schema validation failed", result.stderr)
+        self.assertEqual(result.stdout, "")
 
     def test_missing_middle_projection(self) -> None:
         result = self.run_planner(fixture(missing_projection=True))

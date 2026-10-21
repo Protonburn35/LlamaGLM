@@ -22,7 +22,7 @@ Regenerate without weights:
 
 ```sh
 python3 scripts/glm-fetch-metadata.py /path/to/new-headers
-build/bin/llama-glm-plan --output memory.json /path/to/new-headers/*.header
+build/bin/llama-glm-plan --validate-schema --output memory.json /path/to/new-headers/*.header
 ```
 
 Use headers in lexical shard order. Explicit `--split 21,6,18` or neighboring complete splits can be compared; defaults never shrink the context. B must preload every assigned expert, establish resident RAM/VRAM storage, warm/touch required state and fail closed on unestablished residency or later pressure. Mmap alone is insufficient. No runtime provider implementing this guarantee exists yet.
@@ -39,3 +39,5 @@ Measured metadata-only comparisons at the same 1M context are saved in `docs/mod
 | 20/6/19 | 54.104 | 17.006 | 57.767 |
 
 The 23/5/17 middle range owns two DSA layers, unlike 22/5/18. No final split or Windows residency result is inferred from this comparison. The candidate remains 22/5/18 pending allocator, residency and workload measurements.
+
+With `--validate-schema`, the merged descriptor table is checked by the native GLM loader, including the declared NextN block, using zero-sized weight buffers. The exact pinned headers pass with 1,412 tensors and 120,358,051,192 logical payload bytes. This checks required names/shapes, recognized optional tensors and complete count without reading weights. It does not enable MTP or verify file payloads. Without the option, native_tensor_schema remains NOT_VALIDATED. Neither result grants runtime admission.

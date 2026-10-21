@@ -1,4 +1,6 @@
 #include "stage-plan.h"
+#include "llama-stage.h"
+#include "ggml-cpp.h"
 
 #include <nlohmann/json.hpp>
 
@@ -106,7 +108,7 @@ const char * role_name(glm_stage::tensor_role role) {
     throw std::logic_error("invalid tensor role");
 }
 
-json make_manifest(const std::vector<std::string> & paths, const glm_stage::plan & split) {
+json make_manifest(const std::vector<std::string> & paths, const glm_stage::plan & split, bool validate_schema) {
     if (paths.empty() || paths.size() > 100) {
         throw std::invalid_argument("provide all GGUF shards, with metadata shard first (at most 100)");
     }
@@ -119,11 +121,21 @@ json make_manifest(const std::vector<std::string> & paths, const glm_stage::plan
     if (shards != paths.size() || split_value(first.get(), "split.no") != 0 || tensor_count > 100000) {
         throw std::invalid_argument("incomplete or excessive shard/tensor inventory");
     }
+    gguf_ptr schema_metadata(nullptr, &gguf_free);
+    ggml_context_ptr schema_tensors;
+    if (validate_schema) {
+        if (tensor_count == 0) { throw std::invalid_argument("schema descriptor table is empty"); }
+        schema_metadata.reset(gguf_init_empty());
+        gguf_set_kv(schema_metadata.get(), first.get());
+        schema_tensors.reset(ggml_init({size_t(tensor_count) * ggml_tensor_overhead(), nullptr, true}));
+        if (!schema_tensors) { throw std::runtime_error("cannot allocate schema descriptor headers"); }
+    }
     json result = {
         {"schema_version", glm_stage::plan_version}, {"architecture", "glm5-next"},
         {"context_tokens", split.context}, {"cache_dtype", "f16"}, {"kda_state_dtype", "f32"},
         {"activation_dtype", "f32"}, {"boundary_bytes_per_token", model.boundary_bytes(1)},
         {"admission", "NOT_VALIDATED"}, {"tensor_payloads_verified", false},
+        {"native_tensor_schema", "NOT_VALIDATED"},
         {"limitations", {"Metadata inventory only; no model tensor payload is read.",
             "State bytes exclude allocator overhead, cache bookkeeping, scratch, graphs, OS, display and queues.",
             "RAM/VRAM placement, Windows residency and runtime execution are not validated.",
@@ -146,6 +158,7 @@ json make_manifest(const std::vector<std::string> & paths, const glm_stage::plan
     std::map<uint32_t, std::set<std::string>> layer_tensors;
     uint64_t input_embedding_bytes = 0;
     bool draft_has_embedding = false;
+    uint64_t descriptor_bytes = 0;
     for (size_t index = 0; index < paths.size(); ++index) {
         auto ctx = index == 0 ? std::move(first) : load_header(paths[index]);
         const uint32_t number = split_value(ctx.get(), "split.no");
@@ -164,6 +177,13 @@ json make_manifest(const std::vector<std::string> & paths, const glm_stage::plan
             const uint64_t bytes = gguf_get_tensor_size(ctx.get(), t);
             const uint64_t offset = glm_stage::checked_add(gguf_get_data_offset(ctx.get()), gguf_get_tensor_offset(ctx.get(), t));
             glm_stage::checked_add(offset, bytes);
+            descriptor_bytes = glm_stage::checked_add(descriptor_bytes, bytes);
+            if (validate_schema) {
+                if (name.size() >= GGML_MAX_NAME) { throw std::invalid_argument("tensor name exceeds native backend limit"); }
+                auto * tensor = ggml_new_tensor(schema_tensors.get(), gguf_get_tensor_type(ctx.get(), t), GGML_MAX_DIMS, shape);
+                ggml_set_name(tensor, name.c_str());
+                gguf_add_tensor(schema_metadata.get(), tensor);
+            }
             uint64_t bytes_per_expert = 0;
             if (owner.routed_experts) {
                 bytes_per_expert = glm_stage::expert_file_span(model, shape, offset, bytes, 0).bytes;
@@ -210,6 +230,20 @@ json make_manifest(const std::vector<std::string> & paths, const glm_stage::plan
         stage["all_weights_resident_lower_bound_bytes"] = glm_stage::checked_add(stage["model_weights_bytes"].get<uint64_t>(),
                                                                   stage["target_state_bytes"].get<uint64_t>());
     }
+    if (validate_schema) {
+        llama_backend_init();
+        llama_stage_schema_report report{1, 0, 0, 0, 0};
+        if (!llama_model_validate_stage_schema(schema_metadata.get(), &report)) {
+            throw std::invalid_argument("native GLM tensor schema validation failed");
+        }
+        if (report.tensors != tensor_count || report.target_layers != model.layers || report.nextn_layers != model.nextn_layers ||
+                report.payload_bytes != descriptor_bytes) {
+            throw std::runtime_error("native schema report differs from descriptor inventory");
+        }
+        result["native_tensor_schema"] = "VALIDATED";
+        result["schema_checked_tensors"] = report.tensors;
+        result["schema_weight_allocation_bytes"] = 0;
+    }
     result["draft_state_bytes_if_enabled"] = glm_stage::checked_mul(split.context, (model.kv_latent + 3ULL * model.index_head) * 2);
     result["draft_embedding_mirror_bytes_if_enabled"] = draft_has_embedding ? 0 : input_embedding_bytes;
     result["tensor_count"] = seen_tensors.size();
@@ -219,21 +253,29 @@ json make_manifest(const std::vector<std::string> & paths, const glm_stage::plan
 } // namespace
 
 int main(int argc, char ** argv) {
+    llama_log_set([](ggml_log_level level, const char * message, void *) {
+        if (level >= GGML_LOG_LEVEL_WARN) { std::fputs(message, stderr); }
+    }, nullptr);
     try {
         std::string counts = "22,5,18";
         uint32_t context = glm_stage::max_context;
         std::string output;
+        bool validate_schema = false;
         std::vector<std::string> paths;
         for (int i = 1; i < argc; ++i) {
             const std::string arg = argv[i];
             if (arg == "--help") {
-                std::cout << "Usage: llama-glm-plan [--split 22,5,18] [--context 1048576] [--output manifest.json] shard1.gguf ...\n"
+                std::cout << "Usage: llama-glm-plan [--split 22,5,18] [--context 1048576] [--validate-schema] [--output manifest.json] shard1.gguf ...\n"
                           << "Reads at most 32 MiB of metadata per shard, without loading tensor payloads.\n";
                 return 0;
             }
             if (arg == "--version") {
                 std::cout << "LlamaGLM stage plan schema " << glm_stage::plan_version << '\n';
                 return 0;
+            }
+            if (arg == "--validate-schema") {
+                validate_schema = true;
+                continue;
             }
             if (arg == "--split" || arg == "--context" || arg == "--output") {
                 if (++i == argc) {
@@ -248,7 +290,7 @@ int main(int argc, char ** argv) {
                 paths.push_back(arg);
             }
         }
-        const auto manifest = make_manifest(paths, glm_stage::plan::from_counts(counts, context));
+        const auto manifest = make_manifest(paths, glm_stage::plan::from_counts(counts, context), validate_schema);
         if (output.empty()) {
             std::cout << manifest.dump(2) << '\n';
         } else {

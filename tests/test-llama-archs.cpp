@@ -900,6 +900,51 @@ static int write_glm_pipeline_fixture(const std::string & directory, size_t seed
     return 0;
 }
 
+static void test_stage_schema(const std::filesystem::path & path, uint64_t expected_bytes) {
+    gguf_context_ptr metadata(gguf_init_from_file(path.string().c_str(), {true, nullptr}));
+    if (!metadata) { throw std::runtime_error("cannot read fixture descriptors for native schema validation"); }
+    llama_stage_schema_report report{1, 0, 0, 0, 0};
+    if (!llama_model_validate_stage_schema(metadata.get(), &report) || report.target_layers != 6 || report.nextn_layers != 0 ||
+            report.tensors != gguf_get_n_tensors(metadata.get()) || report.payload_bytes != expected_bytes) {
+        throw std::runtime_error("native no-allocation schema report differs from the complete model");
+    }
+    for (int failure = 0; failure < 9; ++failure) {
+        gguf_context_ptr malformed(gguf_init_empty());
+        gguf_set_kv(malformed.get(), metadata.get());
+        const int64_t count = gguf_get_n_tensors(metadata.get());
+        ggml_context_ptr tensors(ggml_init({size_t(count + 1) * ggml_tensor_overhead(), nullptr, true}));
+        if (!tensors) { throw std::runtime_error("cannot create malformed descriptor fixture"); }
+        size_t removed = 0;
+        for (int64_t i = 0; i < count; ++i) {
+            const char * name = gguf_get_tensor_name(metadata.get(), i);
+            const bool norm = std::strcmp(name, "blk.2.attn_norm.weight") == 0;
+            if ((failure == 0 && norm) || (failure == 4 && std::strcmp(name, "blk.2.ssm_f_a.weight") == 0) ||
+                    (failure == 5 && std::strcmp(name, "blk.3.attn_q_a.weight") == 0)) { ++removed; continue; }
+            std::array<int64_t, GGML_MAX_DIMS> ne;
+            std::copy_n(gguf_get_tensor_ne(metadata.get(), i), ne.size(), ne.begin());
+            if (failure == 1 && norm) { ++ne[0]; }
+            auto * tensor = ggml_new_tensor(tensors.get(), gguf_get_tensor_type(metadata.get(), i), ne.size(), ne.data());
+            ggml_set_name(tensor, name);
+            gguf_add_tensor(malformed.get(), tensor);
+        }
+        if ((failure == 0 || failure == 4 || failure == 5) && removed != 1) { throw std::runtime_error("schema negative fixture removed no projection"); }
+        if (failure == 2) {
+            auto * tensor = ggml_new_tensor_1d(tensors.get(), GGML_TYPE_F32, 128);
+            ggml_set_name(tensor, "blk.2.not_a_projection.weight");
+            gguf_add_tensor(malformed.get(), tensor);
+        }
+        if (failure == 3) { gguf_set_val_u32(malformed.get(), "glm5-next.hyper_connection.count", 3); }
+        if (failure == 6) { gguf_set_val_u32(malformed.get(), "glm5-next.expert_group_count", 3); }
+        if (failure == 7) { gguf_set_val_str(malformed.get(), "glm5-next.rope.scaling.type", "unknown"); }
+        if (failure == 8) { gguf_set_val_str(malformed.get(), "glm5-next.classifier.activation", "unknown"); }
+        report = {1, 0, 0, 0, 0};
+        if (llama_model_validate_stage_schema(malformed.get(), &report) || report.tensors || report.payload_bytes) {
+            throw std::runtime_error("native schema checker admitted missing/malformed/unknown tensors or invalid mHC geometry");
+        }
+    }
+    LOG("Stage schema: native no-allocation validation, full byte inventory and nine malformed descriptor/geometry cases passed\n");
+}
+
 static void test_owned_stage_loading(const size_t seed, const float stdev) {
     auto metadata = glm_stage_fixture_metadata();
     tensor_data_params data{seed, stdev};
@@ -928,6 +973,9 @@ static void test_owned_stage_loading(const size_t seed, const float stdev) {
     std::map<std::string, ggml_tensor *> tensors;
     std::array<llama_model_ptr, 3> stage_models;
     for (const auto & entry : reference->tensors_by_name) { tensors.emplace(entry.first, entry.second); }
+    uint64_t expected_payload = 0;
+    for (const auto & entry : tensors) { expected_payload += ggml_nbytes(entry.second); }
+    test_stage_schema(path, expected_payload);
     for (uint32_t rank = 0; rank < 3; ++rank) {
         const llama_stage_model_params stage{1, rank, {2, 4, 6}};
         std::set<std::string> expected;
@@ -1459,7 +1507,7 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
             }
             if (arch == LLM_ARCH_GLM5_NEXT && (!target_backend || std::strcmp(target_backend, "CPU") == 0)) {
                 test_owned_stage_loading(seed, stdev);
-                n_tests += 2;
+                n_tests += 3;
             }
             std::pair<llama_model_ptr, llama_context_ptr> model_and_ctx_cpu;
             std::vector<float> logits_cpu;

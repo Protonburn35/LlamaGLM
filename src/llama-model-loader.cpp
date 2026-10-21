@@ -542,8 +542,13 @@ llama_model_loader::llama_model_loader(
         bool no_alloc,
         bool load_mtp,
         const llama_model_kv_override * param_overrides_p,
-        const llama_model_tensor_buft_override * param_tensor_buft_overrides_p)
+        const llama_model_tensor_buft_override * param_tensor_buft_overrides_p,
+        bool strict_metadata)
         : metadata(meta), set_tensor_data(set_tensor_data), set_tensor_data_ud(set_tensor_data_ud) {
+    this->strict_metadata = strict_metadata;
+    if (strict_metadata && (!meta || !fname.empty() || file || set_tensor_data || !no_alloc || load_mode != LLAMA_LOAD_MODE_NONE)) {
+        throw std::invalid_argument("strict metadata checking requires descriptors only and no allocations");
+    }
     int trace = 0;
     if (getenv("LLAMA_TRACE")) {
         trace = atoi(getenv("LLAMA_TRACE"));
@@ -713,6 +718,26 @@ llama_model_loader::llama_model_loader(
     } else {
         get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
         llm_kv = LLM_KV(llm_arch_from_string(arch_name));
+        if (strict_metadata) {
+            const int64_t count = gguf_get_n_tensors(metadata);
+            if (count <= 0 || count > 100000) { throw std::invalid_argument("invalid schema descriptor count"); }
+            ggml_init_params params{size_t(count) * ggml_tensor_overhead(), nullptr, true};
+            ggml_context_ptr context(ggml_init(params));
+            if (!context) { throw std::runtime_error("cannot allocate schema tensor metadata"); }
+            for (int64_t i = 0; i < count; ++i) {
+                const char * name = gguf_get_tensor_name(metadata, i);
+                if (!name || !*name || std::strlen(name) >= GGML_MAX_NAME) { throw std::invalid_argument("invalid schema tensor name"); }
+                auto * tensor = ggml_new_tensor(context.get(), gguf_get_tensor_type(metadata, i), GGML_MAX_DIMS,
+                                               gguf_get_tensor_ne(metadata, i));
+                ggml_set_name(tensor, name);
+                if (!weights_map.emplace(name, llama_tensor_weight(tensor)).second) {
+                    throw std::invalid_argument("duplicate schema tensor descriptor");
+                }
+                n_elements += ggml_nelements(tensor);
+                n_bytes += ggml_nbytes(tensor);
+            }
+            contexts.emplace_back(std::move(context));
+        }
     }
 
     n_kv      = gguf_get_n_kv(metadata);
@@ -1290,7 +1315,7 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         return buft;
     };
 
-    if (files.empty()) {
+    if (files.empty() && !strict_metadata) {
         if (flags & TENSOR_SKIP_IF_VIRTUAL) {
             return nullptr;
         }

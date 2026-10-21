@@ -3,9 +3,9 @@
 | Capability | Status | Evidence/limit |
 | --- | --- | --- |
 | Source | PARTIAL | Planner, owned-layer evaluator, authenticated TCP and test-only three-process workers; no production coordinator |
-| Local CPU fixtures | CPU_FIXTURE_PASS | 10 CTest targets (9 planner cases, 12 wire/auth, 4 identity, 8 boundary-transfer, 10 storage/cache, 5 quantized-bank and 8 TCP suites, three-process/missing-middle/changed-tokenizer cases); 4 GLM tests; 2 non-GLM tests |
+| Local CPU fixtures | CPU_FIXTURE_PASS | 11 CTest targets (9 planner cases, 12 wire/auth, 4 identity, 8 boundary-transfer, 12 storage/cache, 6 quantized-bank, 5 host-buffer and 8 TCP suites, three-process/missing-middle/changed-tokenizer cases); 7 GLM tests; 2 non-GLM tests |
 | Real tensor descriptors | NATIVE_SCHEMA_LOCAL_PASS | All 1,412 descriptors and 120,358,051,192 logical bytes match native GLM/NextN tensor definitions; zero weight allocation/read; also passed all Windows jobs at a6138c7ec |
-| Windows compile | WINDOWS_COMPILE_PASS (CPU/SM89/SM120a) | 81f4a71cb, run 39546390989: 10 CTest targets including buffered and streamed three-process inference, 6 GLM CPU tests with desktop streaming and locked B expert preload and native real-header schema validation, including the 128 MiB bridge and fragmented model fixture |
+| Windows compile | WINDOWS_COMPILE_PASS (CPU/SM89/SM120a) | 54265dd8b, run 39551995800: 11 CTest targets including buffered and streamed three-process inference, 6 GLM CPU tests with desktop streaming and locked B expert preload and native real-header schema validation, including the 128 MiB bridge and fragmented model fixture |
 | Three-process TCP | THREE_PROCESS_CPU_FIXTURE_PASS | Actual A/B/C CPU processes, six synthetic layers, 131 tokens; GCC/MSVC boundaries/logits byte-exact |
 | Ada GPU | SM89_GPU_NOT_RUN | No physical GPU tests |
 | Blackwell GPU | SM120_GPU_NOT_RUN | No physical GPU tests |
@@ -15,7 +15,7 @@
 Local commands after a CPU CMake build:
 
 ```sh
-ctest --test-dir build -R '^(test-glm-stage|test-glm-plan|test-glm-storage|test-glm-expert-bank|test-glm-wire|test-glm-identity|test-glm-boundary|test-glm-net|test-glm-pipeline|test-gguf)$' --output-on-failure
+ctest --test-dir build -R '^(test-glm-stage|test-glm-plan|test-glm-storage|test-glm-host-buffer|test-glm-expert-bank|test-glm-wire|test-glm-identity|test-glm-boundary|test-glm-net|test-glm-pipeline|test-gguf)$' --output-on-failure
 build/bin/test-llama-archs --arch glm5-next --backend CPU --seed 53 -v 5
 ```
 
@@ -76,3 +76,8 @@ The new rank-1 model preload API has a sixth local GLM test. It loads every midd
 Rank-1 model preload now passes native Windows CPU in all variants at 81f4a71cb, run 39546390989. Downloaded CPU artifact 12321658446 confirms all six GLM tests, exact preloaded-model boundaries/logits, source-file removal and complete 48-slab startup I/O. The scoped working-set quota also succeeds. This qualifies expert payloads and CPU model execution, not full laptop/state/GPU admission.
 
 The additional locked-GGML-host target has four local suites: all eight real publisher types produce byte-exact CPU matrix outputs against ordinary buffers; scheduler reserve/compute places every tensor in the requested locked type; shared page/entry caps, dummy behavior and partial-context cleanup hold; eight concurrent allocations and retained data-buffer lifetime preserve limits. Eleven CTest targets and six GLM tests pass. All twelve storage suites pass real-lock TSan after the generic-page factor. Host allocator plus fully instrumented GGML/pthread tests also pass all four suites with no report. A prior mixed-instrumentation/OpenMP run produced two synchronization warnings and was not accepted as sanitizer qualification. Native Windows qualification for the new host type is pending; model/state/GPU integration remains open.
+
+
+Host primitive qualification now passes all native Windows variants at 54265dd8b, run 39551995800 attempt 2 (eleven CTest, six GLM). Successful downloaded CPU artifact 12323463908 includes the real-header audit. Its first CPU attempt failed only a transient metadata connection reset after the tests; same-source rerun passed.
+
+Explicit locked host policy 2 adds a seventh local GLM test with separate small F32 KDA-B and DSA-B monolithic oracles. Both source-deleted 131-token pipelines are byte-exact. Ordinary weights, recurrent/MLA/index state and every executed graph node are checked for the actual locked type; tracked page locks are verified during each chunk. The peak shared budgets are 3,452,928 and 6,520,832 bytes, including experts. Model/context cap refusal and cleanup, extra packing/override refusal and unchanged expert startup I/O are required. A fifth host-buffer component suite covers external reservation before its loader, load/null/mismatched-owner failure rollback, shared caps and owner retention through final tensor destruction. All five host suites pass fully instrumented GGML/pthread TSan with real locks, exit 0/no report. New-source Windows qualification is pending. The smaller fixture has four indexer heads and FFN 64; it is not the real model. Full model/process/GPU admission remains false.

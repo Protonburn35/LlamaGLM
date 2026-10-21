@@ -574,7 +574,8 @@ static struct llama_model * llama_model_load_from_file_impl(
         return nullptr;
     }
     if (preload && (!stage || stage->rank != 1 || storage || metadata || file || params.no_alloc || params.check_tensors || params.no_host ||
-            preload->version != 1 || preload->reserved != 0 || preload->bank_slots < 8 || preload->bank_slots > 512 ||
+            (preload->version != 1 && preload->version != 2) || preload->reserved != 0 || preload->bank_slots < 8 || preload->bank_slots > 512 ||
+            (preload->version == 2 && (params.use_extra_bufts || params.tensor_buft_overrides)) ||
             preload->host_payload_bytes == 0 || preload->host_payload_bytes > (1ull << 40) ||
             preload->host_page_bytes == 0 || preload->host_page_bytes > (1ull << 40) ||
             preload->context_bank_bytes == 0 || preload->context_bank_bytes > (1ull << 36) ||
@@ -699,6 +700,14 @@ bool llama_model_stage_preload_report(const llama_model * model, llama_stage_pre
     *report = {}; report->version = 1;
     if (!model || !model->stage_preloaded || !model->stage_source) { return false; }
     try { return model->stage_source->report_preload(*report); }
+    catch (...) { *report = {}; report->version = 1; return false; }
+}
+
+bool llama_model_stage_host_report(const llama_model * model, llama_stage_host_report * report) {
+    if (!report || report->version != 1) { return false; }
+    *report = {}; report->version = 1;
+    if (!model || !model->stage_source) { return false; }
+    try { return model->stage_source->report_host(*report); }
     catch (...) { *report = {}; report->version = 1; return false; }
 }
 

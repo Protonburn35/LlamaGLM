@@ -40,6 +40,8 @@ struct host_buffer_pool::impl : std::enable_shared_from_this<host_buffer_pool::i
     mutable std::mutex mutex;
     std::set<data_buffer *> active;
     host_buffer_stats counters{};
+    std::shared_ptr<void> external_owner;
+    uint64_t (*verify_external)(const void *) = nullptr;
     std::atomic<uint64_t> allocations{0}, failures{0};
     std::atomic<int> last_native_error{0};
 
@@ -150,8 +152,45 @@ host_buffer_stats host_buffer_pool::stats() const {
 }
 void host_buffer_pool::verify_all() const {
     std::lock_guard<std::mutex> lock(state->mutex);
-    if (state->counters.reserved_buffers != state->active.size()) { throw std::runtime_error("host buffers have unfinished allocation/free work"); }
+    if (state->counters.external_pending || state->counters.reserved_buffers != state->active.size()) {
+        throw std::runtime_error("host buffers have unfinished allocation/free work");
+    }
+    if (state->external_owner && state->verify_external(state->external_owner.get()) != state->counters.external_page_bytes) {
+        throw std::runtime_error("external host page accounting changed");
+    }
     for (const auto * buffer : state->active) { buffer->pages->verify_locked(); }
+}
+
+std::shared_ptr<void> host_buffer_pool::preload_external_pages(uint64_t bytes,
+        const std::function<std::shared_ptr<void>()> & loader, uint64_t (*verify)(const void *)) {
+    if (!loader || !verify || bytes == 0 || bytes > std::numeric_limits<size_t>::max() ||
+            locked_pages::required_bytes(size_t(bytes)) != bytes) {
+        throw std::invalid_argument("external host pages require a loader, verifier and exact native page count");
+    }
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if (state->counters.external_page_bytes || bytes > state->budget || state->counters.reserved_page_bytes > state->budget - bytes) {
+            throw std::invalid_argument("external host pages exceed shared capacity or already exist");
+        }
+        state->counters.external_pending = true;
+        state->counters.external_page_bytes = bytes;
+        state->counters.reserved_page_bytes += bytes;
+        state->counters.peak_reserved_page_bytes = std::max(state->counters.peak_reserved_page_bytes, state->counters.reserved_page_bytes);
+    }
+    // Keep the owner inside the try scope so its pages are freed before a failed charge is released.
+    try {
+        auto owner = loader();
+        if (!owner || verify(owner.get()) != bytes) { throw std::runtime_error("external native host page verification differs"); }
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->external_owner = std::move(owner); state->verify_external = verify;
+        state->counters.external_pending = false;
+        return state->external_owner;
+    } catch (...) {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->counters.reserved_page_bytes -= bytes;
+        state->counters.external_page_bytes = 0; state->counters.external_pending = false;
+        throw;
+    }
 }
 
 } // namespace glm_stage

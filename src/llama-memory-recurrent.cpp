@@ -93,6 +93,7 @@ llama_memory_recurrent::llama_memory_recurrent(
 
         LLAMA_LOG_DEBUG("%s, layer %3d: dev = %s\n", __func__, i, dev_name);
 
+        buft = model.stage_buffer_type(buft);
         ggml_context * ctx = ctx_for_buft(buft);
         if (!ctx) {
             throw std::runtime_error("failed to create ggml context for rs cache");

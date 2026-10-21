@@ -200,6 +200,54 @@ static void concurrent_lifetimes(ggml_backend_dev_t cpu) {
             "final host buffer release leaked pages");
 }
 
+static void external_pages(ggml_backend_dev_t cpu) {
+    const auto page = locked_pages::required_bytes(1);
+    const auto baseline = locked_pages::locked_stats();
+    const auto verify = +[](const void * pointer) -> uint64_t {
+        const auto & pages = *static_cast<const locked_pages *>(pointer);
+        pages.verify_locked(); return pages.locked_bytes();
+    };
+    std::weak_ptr<void> weak;
+    ggml_backend_buffer_ptr retained;
+    {
+        host_buffer_pool pool(cpu, 2 * page);
+        refused([&] { pool.preload_external_pages(page + 1, [] { return std::shared_ptr<void>{}; }, verify); });
+        refused([&] { pool.preload_external_pages(page, [] { return std::shared_ptr<void>{}; }, verify); });
+        refused([&] { pool.preload_external_pages(page, [&]() -> std::shared_ptr<void> {
+            auto value = std::make_shared<locked_pages>(size_t(page), page);
+            throw std::runtime_error("injected startup load failure");
+        }, verify); });
+        refused([&] { pool.preload_external_pages(page, [&] {
+            return std::make_shared<locked_pages>(size_t(2 * page), 2 * page);
+        }, verify); });
+        require(pool.stats().reserved_page_bytes == 0 && !pool.stats().external_pending &&
+                locked_pages::locked_stats().bytes == baseline.bytes, "failed external preload leaked pages or reservations");
+        auto owner = pool.preload_external_pages(page, [&] {
+            const auto stats = pool.stats();
+            require(stats.reserved_page_bytes == page && stats.external_page_bytes == page && stats.external_pending,
+                    "external loader ran before its complete page reservation");
+            refused([&] { pool.verify_all(); });
+            refused([&] { pool.preload_external_pages(page, [] { return std::shared_ptr<void>{}; }, verify); });
+            retained = std::async(std::launch::async, [&] {
+                return ggml_backend_buffer_ptr(ggml_backend_buft_alloc_buffer(pool.buffer_type(), 1));
+            }).get();
+            require(bool(retained), "pending external reservation prevented an in-budget concurrent tensor allocation");
+            return std::make_shared<locked_pages>(size_t(page), page);
+        }, verify);
+        weak = owner; owner.reset();
+        ggml_backend_buffer_ptr rejected(ggml_backend_buft_alloc_buffer(pool.buffer_type(), 1));
+        require(retained && !rejected && pool.stats().reserved_page_bytes == 2 * page &&
+                pool.stats().external_page_bytes == page && pool.stats().reserved_buffers == 1,
+                "GGML and external pages exceeded their shared budget");
+        pool.verify_all();
+    }
+    require(!weak.expired() && locked_pages::locked_stats().bytes == baseline.bytes + 2 * page,
+            "retained tensor buffer lost its external page owner");
+    retained.reset();
+    require(weak.expired() && locked_pages::locked_stats().bytes == baseline.bytes &&
+            locked_pages::locked_stats().buffers == baseline.buffers, "external owner outlived final buffer deletion");
+}
+
 int main() {
     try {
         ggml_backend_ptr backend(ggml_backend_cpu_init());
@@ -207,8 +255,9 @@ int main() {
         ggml_backend_cpu_set_n_threads(backend.get(), 2);
         quantized_operations(backend.get()); scheduler(backend.get());
         capacity(ggml_backend_get_device(backend.get())); concurrent_lifetimes(ggml_backend_get_device(backend.get()));
+        external_pages(ggml_backend_get_device(backend.get()));
         ggml_quantize_free();
-        std::puts("GLM host buffers: four suites passed (native quant ops, scheduler, shared capacity/cleanup, concurrent/retained lifetime); full admission NOT_VALIDATED");
+        std::puts("GLM host buffers: five suites passed (native quant ops, scheduler, shared capacity/cleanup, concurrent/retained lifetime, external preload); full admission NOT_VALIDATED");
         return 0;
     } catch (const std::exception & error) {
         std::fprintf(stderr, "GLM host buffer test failed: %s\n", error.what());

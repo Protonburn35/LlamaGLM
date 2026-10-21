@@ -37,7 +37,7 @@ struct expert_bank::impl {
     ggml_backend_buffer_ptr buffer;
 
     impl(ggml_backend_t backend, uint32_t slots, const std::vector<expert_projection> & projections,
-         uint64_t budget, std::function<expert_lease(expert_address)> source) :
+         uint64_t budget, std::function<expert_lease(expert_address)> source, ggml_backend_buffer_type_t buffer_type) :
         backend(backend), slots(slots), experts(0), source(std::move(source)) {
         if (!backend || !this->source || projections.size() != 3 || slots < 8 || slots > 512 || budget == 0 || budget > (1ull << 30)) {
             throw std::invalid_argument("invalid GLM expert bank backend, slots or budget");
@@ -71,7 +71,10 @@ struct expert_bank::impl {
             ggml_set_name(banks[i], ("glm-expert-bank-" + std::to_string(i)).c_str());
         }
         specs = projections;
-        const auto buft = ggml_backend_get_default_buffer_type(backend);
+        const auto buft = buffer_type ? buffer_type : ggml_backend_get_default_buffer_type(backend);
+        if (!ggml_backend_dev_supports_buft(ggml_backend_get_device(backend), buft)) {
+            throw std::invalid_argument("expert bank backend cannot use the requested buffer type");
+        }
         const size_t planned = ggml_backend_alloc_ctx_tensors_from_buft_size(context.get(), buft);
         if (planned == 0 || planned > budget) { throw std::invalid_argument("expert bank backend allocation exceeds local budget"); }
         buffer.reset(ggml_backend_alloc_ctx_tensors_from_buft(context.get(), buft));
@@ -84,10 +87,11 @@ struct expert_bank::impl {
 };
 
 expert_bank::expert_bank(ggml_backend_t backend, uint32_t slots, const std::vector<expert_projection> & specs,
-        uint64_t budget, std::function<expert_lease(expert_address)> source) :
-    state(std::make_shared<impl>(backend, slots, specs, budget, std::move(source))) {}
+        uint64_t budget, std::function<expert_lease(expert_address)> source, ggml_backend_buffer_type_t buffer_type) :
+    state(std::make_shared<impl>(backend, slots, specs, budget, std::move(source), buffer_type)) {}
 
 uint64_t expert_bank::buffer_bytes() const { return ggml_backend_buffer_get_size(state->buffer.get()); }
+ggml_backend_buffer_type_t expert_bank::buffer_type() const { return ggml_backend_buffer_get_type(state->buffer.get()); }
 expert_bank_stats expert_bank::stats() const {
     return {state->materializations.load(), state->slot_hits.load(), state->slot_misses.load(),
         state->copied_slabs.load(), state->copied_bytes.load(), state->failures.load()};

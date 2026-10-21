@@ -77,7 +77,7 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
 target_link_libraries(llama PUBLIC ggml)
 if (LLAMA_GLM_RPC)
     target_compile_definitions(llama PRIVATE LLAMA_GLM_STAGE_STORAGE)
-    target_link_libraries(llama PRIVATE llama-glm-expert-bank)
+    target_link_libraries(llama PRIVATE llama-glm-expert-bank llama-glm-host-buffer)
 endif()
 
 if (BUILD_SHARED_LIBS)

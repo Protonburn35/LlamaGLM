@@ -663,6 +663,23 @@ struct stage_boundaries {
     }
 };
 
+struct stage_host_graph_probe {
+    ggml_backend_buffer_type_t expected = nullptr;
+    size_t checked = 0;
+    bool invalid = false;
+    static bool check(ggml_tensor * tensor, bool ask, void * data) {
+        if (ask) { return true; }
+        auto & probe = *static_cast<stage_host_graph_probe *>(data);
+        const ggml_tensor * storage = tensor;
+        while (!storage->buffer && storage->view_src) { storage = storage->view_src; }
+        if (ggml_nelements(tensor) && (!storage->buffer || ggml_backend_buffer_get_type(storage->buffer) != probe.expected)) {
+            probe.invalid = true;
+        }
+        ++probe.checked;
+        return true;
+    }
+};
+
 static double stage_compare(const float * actual, const std::vector<float> & expected) {
     if (!actual || expected.empty()) { throw std::runtime_error("missing stage oracle outputs"); }
     double max_error = 0;
@@ -693,9 +710,16 @@ static void test_owned_stage_forward(llama_model * reference, const std::array<l
     llama_context_ptr oracle(llama_init_from_model(reference, ref_params));
     if (!oracle) { throw std::runtime_error("cannot create stage reference context"); }
     std::array<llama_context_ptr, 3> contexts;
+    std::array<stage_host_graph_probe, 3> host_probes{};
     const size_t width = size_t(reference->hparams.n_embd) * reference->hparams.dsv4_hc_mult;
     for (size_t rank = 0; rank < 3; ++rank) {
-        contexts[rank].reset(llama_init_stage_from_model(models[rank].get(), params));
+        auto stage_params = params;
+        if (models[rank]->stage_preloaded && models[rank]->stage_preload.version == 2) {
+            host_probes[rank].expected = models[rank]->stage_buffer_type(ggml_backend_cpu_buffer_type());
+            stage_params.cb_eval = stage_host_graph_probe::check;
+            stage_params.cb_eval_user_data = &host_probes[rank];
+        }
+        contexts[rank].reset(llama_init_stage_from_model(models[rank].get(), stage_params));
         if (!contexts[rank]) { throw std::runtime_error("cannot create owned-layer context"); }
         if (llama_model_n_embd_inp(models[rank].get()) != int32_t(rank == 0 ? reference->hparams.n_embd : width) ||
                 llama_model_n_embd_out(models[rank].get()) != int32_t(rank == 2 ? reference->hparams.n_embd : width)) {
@@ -713,11 +737,22 @@ static void test_owned_stage_forward(llama_model * reference, const std::array<l
             if (owned && kda && (recurrent->r_l[layer]->type != GGML_TYPE_F32 || recurrent->s_l[layer]->type != GGML_TYPE_F32)) {
                 throw std::runtime_error("stage reduced KDA state precision");
             }
+            if (owned && kda && models[rank]->stage_preloaded && models[rank]->stage_preload.version == 2) {
+                for (const auto * tensor : {recurrent->r_l[layer], recurrent->s_l[layer]}) {
+                    if (!tensor->buffer || ggml_backend_buffer_get_type(tensor->buffer) != models[rank]->stage_buffer_type(ggml_backend_cpu_buffer_type())) {
+                        throw std::runtime_error("strict host policy omitted recurrent payload protection");
+                    }
+                }
+            }
             for (const auto * cache : {memory->get_mem_attn(), memory->get_mem_idx()}) {
                 ggml_tensor * storage = nullptr;
                 try { storage = cache->get_k_storage(layer); } catch (const std::out_of_range &) {}
                 if (bool(storage) != (owned && !kda) || (storage && storage->type != GGML_TYPE_F16)) {
                     throw std::runtime_error("stage allocated missing, unowned or reduced-precision MLA/index state");
+                }
+                if (storage && models[rank]->stage_preloaded && models[rank]->stage_preload.version == 2 &&
+                        (!storage->buffer || ggml_backend_buffer_get_type(storage->buffer) != models[rank]->stage_buffer_type(ggml_backend_cpu_buffer_type()))) {
+                    throw std::runtime_error("strict host policy omitted MLA/index payload protection");
                 }
             }
         }
@@ -798,8 +833,23 @@ static void test_owned_stage_forward(llama_model * reference, const std::array<l
             llama_set_causal_attn(contexts[0].get(), true);
         }
         position += count;
+        for (const auto & model : models) {
+            if (model->stage_preloaded && model->stage_preload.version == 2) {
+                llama_stage_host_report report{}; report.version = 1;
+                if (!llama_model_stage_host_report(model.get(), &report) || !report.native_payload_locks_verified ||
+                        report.full_residency_validated || report.tensor_buffers < 4 || report.pending_buffers ||
+                        report.reserved_page_bytes <= report.expert_page_bytes || report.reserved_page_bytes > report.page_budget || report.failures) {
+                    throw std::runtime_error("strict host payload accounting/locks failed during full model evaluation");
+                }
+            }
+        }
     }
     common_batch interrupted(contexts[0].get());
+    for (const auto & probe : host_probes) {
+        if (probe.expected && (!probe.checked || probe.invalid)) {
+            throw std::runtime_error("strict host graph executed with an unprotected tensor payload");
+        }
+    }
     interrupted.add(tokens[0], position, 0, false);
     llama_set_abort_callback(contexts[0].get(), [](void *) { return true; }, nullptr);
     if (llama_process(contexts[0].get(), LLAMA_PROCESS_TYPE_DECODE, interrupted.get()) == 0) {
@@ -1019,7 +1069,7 @@ static void test_preloaded_stage_models(const std::filesystem::path & path, llam
         throw std::runtime_error("preloaded source did not lock/read the complete catalog or incorrectly claimed full admission");
     }
     for (auto bad : std::vector<llama_stage_preload_params>{
-            {2,8,6u<<20,6u<<20,8u<<20,64,0}, {1,7,6u<<20,6u<<20,8u<<20,64,0},
+            {3,8,6u<<20,6u<<20,8u<<20,64,0}, {1,7,6u<<20,6u<<20,8u<<20,64,0},
             {1,8,1,6u<<20,8u<<20,64,0}, {1,8,6u<<20,1,8u<<20,64,0},
             {1,8,6u<<20,6u<<20,8u<<20,47,0}, {1,8,6u<<20,6u<<20,8u<<20,64,1}}) {
         llama_model_ptr rejected(llama_model_load_stage_preloaded_from_file(path.string().c_str(), params, {1,1,{2,3,6}}, bad));
@@ -1038,6 +1088,88 @@ static void test_preloaded_stage_models(const std::filesystem::path & path, llam
         throw std::runtime_error("middle expert source changed or performed inference file reads after preload");
     }
     LOG("Stage preloaded: middle experts locked, all 48 slabs read at startup, file removed before 131-token oracle comparison; full model/state/GPU admission NOT_VALIDATED\n");
+}
+
+static void test_locked_host_stage_models(const std::filesystem::path & directory, llama_model_params params, size_t seed, float stdev) {
+    [[maybe_unused]] fixture_lock_quota quota;
+    // A separate oracle with smaller FFNs fits native unprivileged Linux lock quotas.
+    // Latent/KDA widths and all eight selected experts are preserved; the indexer has four heads.
+    auto metadata = glm_stage_fixture_metadata();
+    gguf_set_val_str(metadata.get(), "general.name", "LlamaGLM synthetic locked host fixture v1");
+    gguf_set_val_u32(metadata.get(), "glm5-next.feed_forward_length", 64);
+    gguf_set_val_u32(metadata.get(), "glm5-next.expert_feed_forward_length", 64);
+    gguf_set_val_u32(metadata.get(), "glm5-next.expert_shared_feed_forward_length", 32);
+    gguf_set_val_u32(metadata.get(), "glm5-next.attention.indexer.head_count", 4);
+    tensor_data_params data{seed, stdev};
+    params.use_extra_bufts = false;
+    llama_model_ptr reference(llama_model_init_from_user(metadata.get(), set_tensor_data, &data, params));
+    if (!reference) { throw std::runtime_error("cannot create independent locked host oracle"); }
+    const auto path = directory / "locked host fixture.gguf";
+    llama_model_save_to_file(reference.get(), path.string().c_str());
+    const llama_stage_preload_params preload{2,8,2u<<20,8u<<20,4u<<20,64,0};
+    for (const std::array<uint32_t, 3> ends : {std::array<uint32_t, 3>{2,3,6}, std::array<uint32_t, 3>{3,4,6}}) {
+        const auto middle_path = directory / "locked host middle.gguf";
+        std::filesystem::copy_file(path, middle_path);
+        std::array<llama_model_ptr, 3> models;
+        for (uint32_t rank = 0; rank < 3; ++rank) {
+            const llama_stage_model_params stage{1,rank,{ends[0],ends[1],ends[2]}};
+            models[rank].reset(rank == 1 ? llama_model_load_stage_preloaded_from_file(middle_path.string().c_str(), params, stage, preload) :
+                llama_model_load_stage_from_file(path.string().c_str(), params, stage));
+            if (!models[rank]) { throw std::runtime_error("cannot load locked host stage model"); }
+        }
+        llama_stage_host_report startup{}; startup.version = 1;
+        llama_stage_preload_report experts{}; experts.version = 1;
+        if (!llama_model_stage_host_report(models[1].get(), &startup) || !startup.native_payload_locks_verified ||
+                startup.full_residency_validated || !startup.tensor_buffers || !startup.tensor_requested_bytes || startup.pending_buffers ||
+                !llama_model_stage_preload_report(models[1].get(), &experts) || experts.open_source_files ||
+                startup.expert_page_bytes != experts.locked_bytes || startup.reserved_page_bytes <= startup.expert_page_bytes) {
+            throw std::runtime_error("locked ordinary weights and experts lack complete shared page accounting");
+        }
+        for (const auto & entry : models[1]->tensors_by_name) {
+            const auto * tensor = entry.second;
+            if (entry.first.find("_exps.weight") != std::string::npos) { continue; }
+            if (!tensor->buffer || ggml_backend_buffer_get_type(tensor->buffer) != models[1]->stage_buffer_type(ggml_backend_cpu_buffer_type())) {
+                throw std::runtime_error("ordinary middle weight escaped the locked host policy");
+            }
+        }
+        if (!std::filesystem::remove(middle_path)) { throw std::runtime_error("locked host model retained its source file"); }
+        test_owned_stage_forward(reference.get(), models, seed, 1);
+        llama_stage_host_report after{}; after.version = 1;
+        llama_stage_preload_report final_experts{}; final_experts.version = 1;
+        if (!llama_model_stage_host_report(models[1].get(), &after) || after.reserved_page_bytes != startup.reserved_page_bytes ||
+                after.tensor_buffers != startup.tensor_buffers || after.tensor_requested_bytes != startup.tensor_requested_bytes ||
+                after.peak_reserved_page_bytes <= startup.reserved_page_bytes || after.peak_reserved_page_bytes > preload.host_page_bytes ||
+                !llama_model_stage_preload_report(models[1].get(), &final_experts) || final_experts.startup_read_requests != experts.startup_read_requests ||
+                final_experts.startup_read_bytes != experts.startup_read_bytes) {
+            throw std::runtime_error("locked host context leaked pages or read expert data during inference");
+        }
+        const auto startup_bytes = startup.reserved_page_bytes;
+        models[1].reset();
+        auto tiny = preload; tiny.host_page_bytes = startup_bytes - 1;
+        llama_model_ptr too_small(llama_model_load_stage_preloaded_from_file(path.string().c_str(), params, {1,1,{ends[0],ends[1],ends[2]}}, tiny));
+        if (too_small) { throw std::runtime_error("shared cap admitted ordinary weights beyond complete startup capacity"); }
+        tiny.host_page_bytes = startup_bytes;
+        llama_model_ptr limited(llama_model_load_stage_preloaded_from_file(path.string().c_str(), params, {1,1,{ends[0],ends[1],ends[2]}}, tiny));
+        if (!limited) { throw std::runtime_error("exact startup page budget failed model admission"); }
+        auto context_params = llama_stage_context_default_params_for_model(limited.get());
+        llama_context_ptr refused_context(llama_init_stage_from_model(limited.get(), context_params));
+        llama_stage_host_report failed{}; failed.version = 1;
+        if (refused_context || !llama_model_stage_host_report(limited.get(), &failed) || failed.reserved_page_bytes != startup_bytes ||
+                failed.tensor_buffers != startup.tensor_buffers || !failed.refusals || failed.pending_buffers) {
+            throw std::runtime_error("failed context escaped shared capacity or leaked host pages");
+        }
+        LOG("Stage locked host: B layer %u, startup %llu bytes, peak %llu bytes, source removed, complete 131-token oracle; full admission NOT_VALIDATED\n",
+            ends[0], (unsigned long long)startup_bytes, (unsigned long long)after.peak_reserved_page_bytes);
+    }
+    for (int failure = 0; failure < 2; ++failure) {
+        auto bad = params;
+        const llama_model_tensor_buft_override overrides[] = {{".*", ggml_backend_cpu_buffer_type()}, {nullptr, nullptr}};
+        if (failure == 0) { bad.use_extra_bufts = true; }
+        else { bad.tensor_buft_overrides = overrides; }
+        llama_model_ptr rejected(llama_model_load_stage_preloaded_from_file(path.string().c_str(), bad, {1,1,{2,3,6}}, preload));
+        if (rejected) { throw std::runtime_error("locked host policy accepted an untracked packing/buffer override"); }
+    }
+    std::filesystem::remove(path);
 }
 
 static void test_streamed_callback_failure(llama_model * model) {
@@ -1243,6 +1375,7 @@ static void test_owned_stage_loading(const size_t seed, const float stdev) {
 #ifdef LLAMA_GLM_STAGE_STORAGE
     test_streamed_stage_models(path, reference.get(), params, seed);
     test_preloaded_stage_models(path, reference.get(), params, seed);
+    test_locked_host_stage_models(directory, params, seed, stdev);
 #endif
     if (!std::filesystem::remove(path)) { throw std::runtime_error("stage fixture file remained open after loading"); }
     LOG("Stage-owned loading: three ranks, provider/file bytes, invalid plans and monolithic refusal passed\n");
@@ -1721,7 +1854,7 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
                 test_owned_stage_loading(seed, stdev);
                 n_tests += 3;
 #ifdef LLAMA_GLM_STAGE_STORAGE
-                n_tests += 2;
+                n_tests += 3;
 #endif
             }
             std::pair<llama_model_ptr, llama_context_ptr> model_and_ctx_cpu;

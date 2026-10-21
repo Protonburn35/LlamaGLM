@@ -45,10 +45,12 @@ public:
     };
 
     expert_bank(ggml_backend_t backend, uint32_t slots, const std::vector<expert_projection> & projections,
-                uint64_t bank_budget, std::function<expert_lease(expert_address)> source);
+                uint64_t bank_budget, std::function<expert_lease(expert_address)> source,
+                ggml_backend_buffer_type_t buffer_type = nullptr);
     expert_bank(const expert_bank &) = delete;
     expert_bank & operator=(const expert_bank &) = delete;
     uint64_t buffer_bytes() const;
+    ggml_backend_buffer_type_t buffer_type() const;
     expert_bank_stats stats() const;
     static bool supports_type(ggml_type type);
     // Metadata for graph construction; execution must depend on materialization and retain its lease.

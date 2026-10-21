@@ -723,6 +723,7 @@ struct llama_model {
     llama_stage_storage_params stage_storage = {};
     llama_stage_preload_params stage_preload = {};
     std::shared_ptr<llama_stage_weight_source> stage_source;
+    ggml_backend_buffer_type_t stage_buffer_type(ggml_backend_buffer_type_t original) const;
     bool stage_owns_tensor(const std::string & name) const;
     bool stage_owns_layer(uint32_t layer) const;
     uint32_t n_embd_inp() const;

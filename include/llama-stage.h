@@ -54,10 +54,10 @@ struct llama_stage_bank_report {
 LLAMA_API bool llama_context_stage_bank_report(const struct llama_context * ctx, struct llama_stage_bank_report * report);
 
 struct llama_stage_preload_params {
-    uint32_t version; // must be 1
+    uint32_t version; // 1: locked experts; 2: shared locked experts and CPU tensor buffers
     uint32_t bank_slots;
     uint64_t host_payload_bytes;
-    uint64_t host_page_bytes;
+    uint64_t host_page_bytes; // v2: combined expert and CPU tensor page budget
     uint64_t context_bank_bytes;
     uint32_t host_entries; // 1..100000, complete owned routed catalog
     uint32_t reserved;     // must be 0
@@ -75,6 +75,26 @@ struct llama_stage_preload_report {
 };
 
 LLAMA_API bool llama_model_stage_preload_report(const struct llama_model * model, struct llama_stage_preload_report * report);
+
+struct llama_stage_host_report {
+    uint32_t version; // caller initializes to 1; inspect between decodes and allocation/free operations
+    uint32_t native_payload_locks_verified;
+    uint32_t full_residency_validated; // always 0: backend work/metadata/network/GPU admission is separate
+    int32_t last_native_error;
+    uint64_t page_budget;
+    uint64_t reserved_page_bytes;
+    uint64_t peak_reserved_page_bytes;
+    uint64_t expert_page_bytes;
+    uint64_t tensor_requested_bytes;
+    uint64_t tensor_buffers;
+    uint64_t pending_buffers;
+    uint64_t allocations;
+    uint64_t refusals;
+    uint64_t failures;
+};
+
+// Available only for preload policy 2. Verifies the tracked native payload pages, not full admission.
+LLAMA_API bool llama_model_stage_host_report(const struct llama_model * model, struct llama_stage_host_report * report);
 
 struct llama_stage_schema_report {
     uint32_t version; // caller must initialize to 1
@@ -108,7 +128,9 @@ LLAMA_API struct llama_model * llama_model_load_stage_streamed_from_file(
         struct llama_stage_storage_params storage);
 
 // Experimental rank 1: preload every owned routed expert into locked host pages and close its readers.
-// Ordinary dense/shared weights load normally. This alone does not establish complete laptop admission.
+// v1 protects expert payloads; v2 also routes ordinary host tensor/cache/graph/output/bank
+// buffers through the same page budget. v2 requires use_extra_bufts=false and no buffer overrides.
+// Backend work buffers, metadata, network/staging and GPU residency still require admission.
 LLAMA_API struct llama_model * llama_model_load_stage_preloaded_from_file(
         const char * path_model,
         struct llama_model_params params,

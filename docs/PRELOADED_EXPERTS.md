@@ -26,3 +26,5 @@ Policy 2 passes native Windows in all variants at 0cd4a9331 (seven GLM tests, fi
 
 
 The existing model progress callback now covers expert preload and ordinary weights on one byte-weighted monotonic scale. It may cancel before the first expert read or after each complete expert slab, and ordinary loading still honors cancellation through final completion. The startup callback is not stored in the inference reader. Cancellation releases partial locks/reservations and file readers and returns no model. Ten local v1/v2 cancellation/reload cases and inference-with-no-callback checks pass. Current native reads remain synchronous: this does not implement interruption/deadlines inside an in-flight slab read.
+
+CPU scratch, explicit plans, test quota restoration and startup progress/cancellation now pass native Windows CPU in all three variants at 0fae41d97, run 39558328891 (eleven CTest, seven GLM). CPU artifact 12326731252 confirms six host suites and ten v1/v2 cancellation/reload cases. Production lock refusal is unchanged, and full working-set/GPU admission stays false. See RESIDENCY_STATUS.md for remaining allocation coverage.

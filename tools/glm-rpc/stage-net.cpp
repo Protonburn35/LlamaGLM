@@ -23,6 +23,14 @@
 namespace glm_rpc {
 namespace {
 
+void add_saturated(std::atomic<uint64_t> & counter, uint64_t amount) noexcept {
+    auto value = counter.load(std::memory_order_relaxed);
+    while (true) {
+        const auto next = amount > UINT64_MAX-value ? UINT64_MAX : value+amount;
+        if (counter.compare_exchange_weak(value,next,std::memory_order_relaxed)) { return; }
+    }
+}
+
 #ifdef _WIN32
 using native_socket = SOCKET;
 constexpr native_socket invalid_socket = INVALID_SOCKET;
@@ -149,9 +157,26 @@ struct tcp_socket::impl {
     native_socket handle;
     bool listener;
     std::atomic<bool> stopped{false};
+    std::atomic<uint64_t> read_bytes{0}, written_bytes{0}, recv_calls{0}, send_calls{0};
+    std::atomic<uint64_t> read_waits{0}, write_waits{0}, read_wait_ns{0}, write_wait_ns{0};
+    std::atomic<uint64_t> read_failures{0}, write_failures{0}, timeout_calls{0};
 
     impl(native_socket handle, bool listener) : handle(handle), listener(listener) {}
     ~impl() { if (handle != invalid_socket) { close_socket(handle); } }
+    void wait(bool writing, deadline until) {
+        auto & count = writing ? write_waits : read_waits;
+        auto & elapsed = writing ? write_wait_ns : read_wait_ns;
+        add_saturated(count,1);
+        struct timer {
+            std::atomic<uint64_t> & counter;
+            deadline start = std::chrono::steady_clock::now();
+            ~timer() {
+                const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count();
+                add_saturated(counter,uint64_t(std::max<int64_t>(0,ns)));
+            }
+        } measure{elapsed};
+        wait_socket(handle,writing,until,stopped);
+    }
 };
 
 io_error::io_error(io_failure reason, int code, const char * message) : std::runtime_error(message), reason(reason), code(code) {}
@@ -238,22 +263,35 @@ void tcp_socket::interrupt() noexcept {
     if (state && !state->stopped.exchange(true)) { shutdown_socket(state->handle); }
 }
 
+tcp_io_stats tcp_socket::io_stats() const noexcept {
+    if (!state) { return {}; }
+    const auto get = [](const std::atomic<uint64_t> & value) { return value.load(std::memory_order_relaxed); };
+    return {get(state->read_bytes),get(state->written_bytes),get(state->recv_calls),get(state->send_calls),
+        get(state->read_waits),get(state->write_waits),get(state->read_wait_ns),get(state->write_wait_ns),
+        get(state->read_failures),get(state->write_failures),get(state->timeout_calls)};
+}
+
 void tcp_socket::read_exact(uint8_t * output, size_t size, deadline until) {
     if (!state || state->listener || (!output && size)) { throw std::invalid_argument("invalid GLM stream read"); }
     try {
         if (state->stopped.load()) { throw io_error(io_failure::closed, 0, "GLM connection was interrupted"); }
         while (size) {
-            wait_socket(state->handle, false, until, state->stopped);
+            state->wait(false,until);
             const int count = int(std::min<size_t>(size, INT_MAX));
+            add_saturated(state->recv_calls,1);
             const auto received = recv(state->handle, reinterpret_cast<char *>(output), count, 0);
-            if (received > 0) { output += received; size -= size_t(received); continue; }
+            if (received > 0) { add_saturated(state->read_bytes,uint64_t(received)); output += received; size -= size_t(received); continue; }
             if (received == 0) { throw io_error(io_failure::closed, 0, "GLM peer closed during read"); }
             const int code = last_error();
             if (!pending(code) && !interrupted(code)) { throw io_error(failure_reason(code), code, "GLM stream read failed"); }
         }
         check_deadline(until);
         if (state->stopped.load()) { throw io_error(io_failure::closed, 0, "GLM connection was interrupted"); }
-    } catch (...) { interrupt(); throw; }
+    } catch (const io_error & error) {
+        add_saturated(state->read_failures,1);
+        if (error.reason == io_failure::timeout) { add_saturated(state->timeout_calls,1); }
+        interrupt(); throw;
+    } catch (...) { add_saturated(state->read_failures,1); interrupt(); throw; }
 }
 
 void tcp_socket::write_all(bytes_view input, deadline until) {
@@ -261,22 +299,27 @@ void tcp_socket::write_all(bytes_view input, deadline until) {
     try {
         if (state->stopped.load()) { throw io_error(io_failure::closed, 0, "GLM connection was interrupted"); }
         while (input.size) {
-            wait_socket(state->handle, true, until, state->stopped);
+            state->wait(true,until);
             const int count = int(std::min<size_t>(input.size, INT_MAX));
 #ifdef _WIN32
             const int flags = 0;
 #else
             const int flags = MSG_NOSIGNAL;
 #endif
+            add_saturated(state->send_calls,1);
             const auto sent = send(state->handle, reinterpret_cast<const char *>(input.data), count, flags);
-            if (sent > 0) { input.data += sent; input.size -= size_t(sent); continue; }
+            if (sent > 0) { add_saturated(state->written_bytes,uint64_t(sent)); input.data += sent; input.size -= size_t(sent); continue; }
             if (sent == 0) { throw io_error(io_failure::closed, 0, "GLM peer closed during write"); }
             const int code = last_error();
             if (!pending(code) && !interrupted(code)) { throw io_error(failure_reason(code), code, "GLM stream write failed"); }
         }
         check_deadline(until);
         if (state->stopped.load()) { throw io_error(io_failure::closed, 0, "GLM connection was interrupted"); }
-    } catch (...) { interrupt(); throw; }
+    } catch (const io_error & error) {
+        add_saturated(state->write_failures,1);
+        if (error.reason == io_failure::timeout) { add_saturated(state->timeout_calls,1); }
+        interrupt(); throw;
+    } catch (...) { add_saturated(state->write_failures,1); interrupt(); throw; }
 }
 
 binding authenticate_client(tcp_socket & socket, const secret & psk, const auth_identity & expected, deadline until) {

@@ -77,6 +77,12 @@ static void authenticated_exchange() {
             std::swap(reply.sender, reply.receiver);
             write_frame(socket, tx, reply, {message.payload.data(), message.payload.size()}, shortly());
         }
+        const auto stats = socket.io_stats();
+        const uint64_t framed = uint64_t(max_frame_bytes)+65536+2*wire_header_bytes;
+        require(stats.read_bytes == framed+160 && stats.written_bytes == framed+320 && stats.recv_calls && stats.send_calls &&
+                stats.read_waits >= stats.recv_calls && stats.write_waits >= stats.send_calls &&
+                !stats.read_failures && !stats.write_failures && !stats.timeout_calls,
+                "server stream telemetry differs from actual handshake/frame bytes");
     });
     auto socket = tcp_socket::connect(endpoint, shortly());
     const auto peer = authenticate_client(socket, f.psk, f.identity, shortly());
@@ -93,6 +99,11 @@ static void authenticated_exchange() {
                 "authenticated network echo differs");
     }
     server.get();
+    const auto stats = socket.io_stats();
+    const uint64_t framed = uint64_t(max_frame_bytes)+65536+2*wire_header_bytes;
+    require(stats.read_bytes == framed+320 && stats.written_bytes == framed+160 && stats.recv_calls && stats.send_calls &&
+            stats.read_wait_ns && stats.write_wait_ns && !stats.read_failures && !stats.write_failures,
+            "client stream telemetry differs from actual handshake/frame bytes or omitted readiness timing");
 }
 
 static void control_independence() {
@@ -157,6 +168,10 @@ static void deadline_shutdown() {
     io_refused([&] { server.read_exact(&byte, 1, shortly()); }, io_failure::closed);
     io_refused([&] { server.write_all({nullptr, 0}, shortly()); }, io_failure::closed);
     io_refused([&] { client.read_exact(&byte, 1, shortly()); }, io_failure::closed);
+    const auto stats = server.io_stats();
+    require(!stats.read_bytes && !stats.written_bytes && !stats.recv_calls && !stats.send_calls &&
+            stats.read_failures == 2 && stats.write_failures == 1 && stats.timeout_calls == 1 && stats.read_waits == 1,
+            "deadline/poisoned-call telemetry invented transfer bytes or lost failures");
 }
 
 static void partial_read_close() {
@@ -169,6 +184,9 @@ static void partial_read_close() {
     uint8_t output[5];
     io_refused([&] { server.read_exact(output, sizeof(output), shortly()); }, io_failure::closed);
     io_refused([&] { server.read_exact(output, 1, shortly()); }, io_failure::closed);
+    const auto stats = server.io_stats();
+    require(stats.read_bytes == 3 && client.io_stats().written_bytes == 3 && stats.read_failures == 2 &&
+            !stats.timeout_calls && stats.recv_calls >= 1, "partial failed transfer telemetry counted requested bytes");
 }
 
 static void authentication_refusal() {
@@ -236,11 +254,31 @@ static void concurrent_interrupt() {
     accept.get();
 }
 
+static void concurrent_telemetry() {
+    auto listener = tcp_socket::listen({"127.0.0.1",0});
+    auto client = tcp_socket::connect(listener.local_endpoint(),shortly());
+    auto server = listener.accept(shortly());
+    std::vector<uint8_t> sent(max_frame_bytes,0x53), received(sent.size());
+    auto read = std::async(std::launch::async,[&] { server.read_exact(received.data(),received.size(),shortly()); });
+    auto write = std::async(std::launch::async,[&] { client.write_all({sent.data(),sent.size()},shortly()); });
+    uint64_t previous = 0;
+    while (read.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+        const auto stats = server.io_stats();
+        require(stats.read_bytes >= previous && stats.read_bytes <= sent.size(), "concurrent byte snapshot regressed or exceeded transfer");
+        previous = stats.read_bytes;
+    }
+    write.get(); read.get();
+    require(received == sent && server.io_stats().read_bytes == sent.size() && client.io_stats().written_bytes == sent.size(),
+            "concurrent telemetry lost actual stream bytes");
+    auto moved = std::move(client);
+    require(!client.io_stats().written_bytes && moved.io_stats().written_bytes == sent.size(), "socket move lost or duplicated counters");
+}
+
 int main() {
     try {
         for (auto test : {authenticated_exchange, control_independence, deadline_shutdown, partial_read_close,
-                          authentication_refusal, forged_header_refusal, interface_refusal, concurrent_interrupt}) { test(); }
-        std::puts("GLM TCP: 8 suites passed; authenticated loopback, FP32 bits, control/backpressure, deadline, EOF, malformed peer and interrupt");
+                          authentication_refusal, forged_header_refusal, interface_refusal, concurrent_interrupt, concurrent_telemetry}) { test(); }
+        std::puts("GLM TCP: 9 suites passed; authenticated loopback, FP32 bits, control/backpressure, deadline, EOF, malformed peer, interrupt and actual-byte/concurrent telemetry");
         return 0;
     } catch (const io_error & error) {
         std::fprintf(stderr, "GLM TCP test failed: %s (category %d, native code %d)\n", error.what(), int(error.reason), error.code);

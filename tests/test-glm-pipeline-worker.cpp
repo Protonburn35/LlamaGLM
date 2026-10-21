@@ -91,8 +91,22 @@ static epoch_plan read_recovery_plan(uint32_t rank, const epoch_plan & previous)
     return result;
 }
 
+static tcp_io_stats sum_io(const tcp_io_stats & a, const tcp_io_stats & b) {
+    const auto add = [](uint64_t x, uint64_t y) { return y > UINT64_MAX-x ? UINT64_MAX : x+y; };
+    return {add(a.read_bytes,b.read_bytes),add(a.written_bytes,b.written_bytes),add(a.recv_calls,b.recv_calls),add(a.send_calls,b.send_calls),
+        add(a.read_waits,b.read_waits),add(a.write_waits,b.write_waits),add(a.read_wait_ns,b.read_wait_ns),add(a.write_wait_ns,b.write_wait_ns),
+        add(a.read_failures,b.read_failures),add(a.write_failures,b.write_failures),add(a.timeout_calls,b.timeout_calls)};
+}
+
+static json io_evidence(const tcp_io_stats & value) {
+    return {{"read_bytes",value.read_bytes},{"written_bytes",value.written_bytes},{"recv_calls",value.recv_calls},{"send_calls",value.send_calls},
+        {"read_waits",value.read_waits},{"write_waits",value.write_waits},{"read_wait_ns",value.read_wait_ns},{"write_wait_ns",value.write_wait_ns},
+        {"read_failures",value.read_failures},{"write_failures",value.write_failures},{"timeout_calls",value.timeout_calls}};
+}
+
 struct fixture_control {
     tcp_socket socket;
+    tcp_io_stats retired_io;
     std::unique_ptr<sender> tx;
     std::unique_ptr<receiver> rx;
 
@@ -122,7 +136,10 @@ static void send_control(fixture_control & peer, const step_key & step, kind typ
 static void connect_controls(uint32_t rank, std::array<fixture_control, 3> & controls, tcp_socket & control_listener,
         const secret & psk, const digest & identity, const limits & bounds, const std::array<uint16_t, 3> & ports) {
     // Reconnect only after known global completion. Old directional codecs/counters are discarded.
-    for (auto & link : controls) { link.socket.interrupt(); link = fixture_control{}; }
+    for (auto & link : controls) {
+        const auto totals = sum_io(link.retired_io,link.socket.io_stats());
+        link.socket.interrupt(); link = fixture_control{}; link.retired_io = totals;
+    }
     if (rank == 0) {
         for (uint32_t remote : {1u, 2u}) {
             auto & link = controls[remote];
@@ -439,6 +456,7 @@ int main(int argc, char ** argv) {
         std::array<digest,7> published_fingerprints{};
         size_t published_chunks = 0, published_rows = 0;
         const auto execute_epoch = [&](const epoch_plan & plan) {
+            const auto epoch_started = std::chrono::steady_clock::now();
             const auto & session = plan.session;
             const auto generation = plan.generation;
             const auto next_port = plan.next_port;
@@ -491,6 +509,7 @@ int main(int argc, char ** argv) {
             size_t terminal_transfers = 0;
             size_t executions = 0, committed_retries = 0, network_retries = 0;
             size_t replayed_rows = 0, new_output_rows = 0;
+            uint64_t compute_ns = 0;
             size_t position = 0;
             try {
             for (size_t chunk = 0; chunk < expected_chunks.size(); ++chunk) {
@@ -520,7 +539,10 @@ int main(int argc, char ** argv) {
                 }
                 const auto input_digest = rank ? fingerprint_bytes(input.data(), input.size() * sizeof(float)) : step.request_digest;
                 if (ledger) { require(ledger->prepare(step, input_digest) == step_disposition::execute, "fixture attempted duplicate graph execution"); }
-                require(llama_process(context.get(), LLAMA_PROCESS_TYPE_DECODE, batch.get()) == 0, "owned stage decode failed");
+                const auto compute_started = std::chrono::steady_clock::now();
+                const int status = llama_process(context.get(), LLAMA_PROCESS_TYPE_DECODE, batch.get());
+                compute_ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-compute_started).count());
+                require(status == 0, "owned stage decode failed");
                 ++executions;
                 const float * values = rank == 2 ? llama_get_logits(context.get()) : llama_get_embeddings(context.get());
                 require(values != nullptr, "owned stage did not return output");
@@ -645,6 +667,12 @@ int main(int argc, char ** argv) {
                     {"misses",bank.slot_misses}, {"copied_slabs",bank.copied_slabs}, {"copied_bytes",bank.copied_bytes}, {"failures",bank.failures}};
                 std::printf("GLM_PIPELINE_BANK %s\n", evidence.dump().c_str());
             }
+            json control_io = json::array();
+            for (const auto & link : controls) { control_io.push_back(io_evidence(sum_io(link.retired_io,link.socket.io_stats()))); }
+            const auto wall_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-epoch_started).count();
+            const json performance{{"rank",rank},{"generation",plan.generation},{"compute_ns",compute_ns},{"epoch_wall_ns",wall_ns},
+                {"data_in",io_evidence(incoming.io_stats())},{"data_out",io_evidence(outgoing.io_stats())},{"control",control_io}};
+            std::printf("GLM_PIPELINE_IO %s\n",performance.dump().c_str());
             std::printf("GLM_PIPELINE_DONE %u 131\n", rank);
             std::fflush(stdout);
         };

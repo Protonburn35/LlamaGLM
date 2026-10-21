@@ -209,6 +209,38 @@ def check_storage(worker: Worker, streamed: bool, logical_bytes: int, locked: bo
               f"native reads {final['native_read_requests']}; native requested bytes {final['native_read_bytes']}")
 
 
+def check_io(workers: list[Worker], transactional: bool = False, generation: int = 1) -> None:
+    # Exact byte ledger includes fixed handshakes and every frame; syscall counts/times
+    # remain measured OS-dependent values. No TCP/IP overhead or GPU throughput is implied.
+    forwarded = 131*512*4 + 8*160 + 160 + (512*4+160 if transactional else 0)
+    controls = {0: [(0,0),(7040,7360),(10496,7360)],
+                1: [(7360,7040),(0,0),(0,0)], 2: [(7360,10496),(0,0),(0,0)]}
+    for worker in workers:
+        records = [json.loads(line.removeprefix("GLM_PIPELINE_IO ")) for line in worker.lines
+                   if line.startswith("GLM_PIPELINE_IO ")]
+        if len(records) != 1:
+            raise RuntimeError("completed worker did not retain exactly one epoch I/O/timing record")
+        record = records[0]
+        if not (record["rank"] == worker.rank and record["generation"] == generation and
+                record["epoch_wall_ns"] >= record["compute_ns"] > 0 and len(record["control"]) == 3):
+            raise RuntimeError("worker I/O/timing identity or actual compute duration is invalid")
+        expected = [(forwarded,320) if worker.rank else (0,0),
+                    (320,forwarded) if worker.rank < 2 else (0,0)]
+        expected += controls[worker.rank] if transactional else [(0,0)]*3
+        channels = [record["data_in"],record["data_out"],*record["control"]]
+        for observed, (read,written) in zip(channels,expected):
+            if (observed["read_bytes"],observed["written_bytes"]) != (read,written) or any(
+                    observed[name] != 0 for name in ("read_failures","write_failures","timeout_calls")):
+                raise RuntimeError("actual stream byte/failure counters differ from complete protocol ledger")
+            if (read and not observed["recv_calls"]) or (written and not observed["send_calls"]) or any(value < 0 for value in observed.values()):
+                raise RuntimeError("worker omitted actual stream calls or wrapped counters")
+        print(f"RPC_IO_RANK {worker.rank}: data read {record['data_in']['read_bytes']+record['data_out']['read_bytes']}; "
+              f"data written {record['data_in']['written_bytes']+record['data_out']['written_bytes']}; "
+              f"control read {sum(item['read_bytes'] for item in record['control'])}; "
+              f"control written {sum(item['written_bytes'] for item in record['control'])}; "
+              f"CPU compute ns {record['compute_ns']}; epoch wall ns {record['epoch_wall_ns']}")
+
+
 def run(oracle: pathlib.Path, executable: pathlib.Path, *, streamed: bool = False, locked: bool = False) -> None:
     streamed = streamed or locked
     with tempfile.TemporaryDirectory(prefix="glm three process fixture ") as directory:
@@ -245,6 +277,7 @@ def run(oracle: pathlib.Path, executable: pathlib.Path, *, streamed: bool = Fals
                 raise RuntimeError("pipeline did not create three distinct worker processes")
             for worker in workers:
                 worker.finish(True)
+            check_io(workers)
             payload_bytes = 0
             maximum = 0.0
             for worker in workers:
@@ -398,6 +431,7 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path) -> None:
                         raise RuntimeError("lost-ACK test failed before the intended partial commit")
                     print("LOST_COMMIT_ACK_REFUSAL_PASS: B committed then dropped ACK; A/B/C invalidated; zero output")
                     return
+                check_io(workers,True,2 if recover_once else generation)
                 certificates: list[list[str]] = []
                 total_owned = 0
                 maximum = 0.0

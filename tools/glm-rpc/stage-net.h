@@ -18,6 +18,12 @@ struct endpoint {
 
 enum class io_failure { timeout, closed, system };
 
+struct tcp_io_stats {
+    uint64_t read_bytes = 0, written_bytes = 0, recv_calls = 0, send_calls = 0;
+    uint64_t read_waits = 0, write_waits = 0, read_wait_ns = 0, write_wait_ns = 0;
+    uint64_t read_failures = 0, write_failures = 0, timeout_calls = 0;
+};
+
 class io_error : public std::runtime_error {
 public:
     io_error(io_failure reason, int code, const char * message);
@@ -44,6 +50,10 @@ public:
     void read_exact(uint8_t * output, size_t size, deadline until);
     void write_all(bytes_view input, deadline until);
     void interrupt() noexcept;
+    // Saturating stream counters include handshake/framing and partial failed transfers.
+    // Wait time covers readiness checks, not compute/connect/accept or TCP/IP overhead.
+    // Concurrent snapshots are approximate across fields; report after joining for exact totals.
+    tcp_io_stats io_stats() const noexcept;
 
 private:
     struct impl;

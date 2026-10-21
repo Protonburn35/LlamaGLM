@@ -1,7 +1,7 @@
 # Open engineering work
 
 1. P0: local owned-layer execution now passes small CPU boundary/logit comparisons, including KDA-only/DSA-only stages and injected abort recovery by context recreation. Qualify the exact Windows source, real mixed quant and CUDA execution. The append-only stage API has no distributed coordinator; any uncertain compute requires all stage contexts to reset/replay together.
-2. P0: no three-rank authenticated TCP transport or transaction state machine. Implement bounded framing, control isolation, epoch/dedup, cancellation and uncertain-state reset before any user-facing candidate.
+2. P0: authenticated bounded frame components exist with CPU vectors/refusal tests; no TCP listeners, mutual handshake, fragment assembly or transaction state machine. Implement explicit interfaces, deadlines/backpressure, actual control isolation, cross-connection epoch/dedup, cancellation and all-owner uncertain-state reset before any user-facing candidate.
 3. P0: desktop local SSD tier and laptop resident-only weight provider are absent. Prove Windows RAM/VRAM admission, no hidden full-model copies, and no inference-time laptop paging/SSD fallback.
 4. P1: memory manifest excludes allocator/cell metadata, Windows/WDDM reserves, scratch/graphs, queues, vision, prefix/snapshot buffers and speculative peaks. Current byte totals are not admission guarantees.
 5. P1: parser checks geometry, descriptors, complete shard count, layer/global coverage and every dense/routed/shared FFN projection; it is not yet a complete attention/KDA tensor/shape validator. Structural parser fixtures now exist. Complete the source-derived schema before using the manifest to admit an executor.

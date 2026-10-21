@@ -3,7 +3,7 @@
 | Capability | Status | Evidence/limit |
 | --- | --- | --- |
 | Source | PARTIAL | Planner, owned-weight loaders and local owned-layer evaluator; no distributed executor |
-| Local CPU fixtures | CPU_FIXTURE_PASS | 3 CTest targets (8 planner cases); 3 GLM tests including owned loading/forward; 2 non-GLM regression tests |
+| Local CPU fixtures | CPU_FIXTURE_PASS | 4 CTest targets (8 planner cases, 9 wire suites); 3 GLM tests including owned loading/forward; 2 non-GLM regression tests |
 | Real tensor descriptors | PASS | 1,412 descriptors across all four pinned headers; no tensor data loaded |
 | Windows compile | WINDOWS_COMPILE_PASS (CPU); CUDA pending | 1410c4041, run 39516895221 CPU passed; stage-forward changes await their own Windows build |
 | Three-process TCP | THREE_PROCESS_TCP_NOT_RUN | Transport not implemented |
@@ -15,11 +15,13 @@
 Local commands after a CPU CMake build:
 
 ```sh
-ctest --test-dir build -R '^(test-glm-stage|test-glm-plan|test-gguf)$' --output-on-failure
+ctest --test-dir build -R '^(test-glm-stage|test-glm-plan|test-glm-wire|test-gguf)$' --output-on-failure
 build/bin/test-llama-archs --arch glm5-next --backend CPU --seed 53 -v 5
 ```
 
 Require a nonzero completed-test summary from the architecture runner. A zero exit with muted/no summary is insufficient evidence by itself. Tests are assertions/checks in Release builds too; new checks do not rely on disabled C assertions.
+
+Wire tests require `-DLLAMA_GLM_RPC=ON`. Nine component suites exercise an RFC 4231 HMAC vector, independent Python-derived key/header/MAC vectors, every header byte and selected payload corruptions, wrong link identity/direction/channel, replay/skipped frame rejection, fatal receiver invalidation, forged lengths/counts before payload allocation, control/data separation and a 128 MiB logical boundary processed in bounded 4 MiB fragments. Local crypto backend: OpenSSL 3.5.7. Native Windows CNG qualification is pending CI. These are byte-codec tests with no sockets, handshake, fragment reassembly, model execution or transaction semantics.
 
 Owned-loader qualification uses a synthetic six-layer GLM fixture with small dimensions. It verifies exact rank tensor sets, byte-for-byte provider/file payload equality, owned byte counters, invalid plans/modes, refusal of ordinary context creation/export, and closure of file handles. The source GGUF is removed after use. The experimental side header compiles as C and exports unmangled model/context symbols in the shared library.
 

@@ -55,3 +55,5 @@
 
 
 - Reuse the model's existing progress callback for startup expert preload and ordinary weights, with logical byte weighting and no regression to zero between phases. Derive ordinary bytes from actual tensor descriptors before loader mapping initialization. Keep callbacks local to startup, honor cancellation before/after complete expert reads and at ordinary-load completion, and unwind all partial pages/readers before returning no model. Retain the separate requirement for native in-flight I/O cancellation/deadlines.
+
+- Qualify locked B host allocation across actual process/transport boundaries using a third, separately generated small monolithic oracle and 2/1/3 ownership. Preserve both earlier 2/2/2 profiles. Give B a separate same-basename source copy and remove it before A connects, requiring immutable complete-catalog startup counters and tracked native locks through inference. Keep full residency false for metadata/network/control/GPU gaps and retain all missing-middle/identity refusal cases.

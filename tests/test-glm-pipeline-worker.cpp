@@ -9,6 +9,7 @@
 #include "stage-net.h"
 #include "stage-identity.h"
 #include "stage-boundary.h"
+#include "glm-fixture-lock-quota.h"
 
 #include <nlohmann/json.hpp>
 
@@ -17,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <optional>
 
 using namespace glm_rpc;
 using json = nlohmann::json;
@@ -36,13 +38,14 @@ static void require(bool condition, const char * message) {
     if (!condition) { throw std::runtime_error(message); }
 }
 
-static execution_identity fixture_identity(const std::string & path) {
+static execution_identity fixture_identity(const std::string & path, bool locked) {
     require(std::filesystem::file_size(path) <= (128ull << 20), "worker accepts only the small synthetic test model");
     gguf_context_ptr metadata(gguf_init_from_file(path.c_str(), {true, nullptr}));
     require(bool(metadata), "invalid fixture GGUF metadata");
     const int64_t name = gguf_find_key(metadata.get(), "general.name");
     require(name >= 0 && gguf_get_kv_type(metadata.get(), name) == GGUF_TYPE_STRING &&
-            std::strcmp(gguf_get_val_str(metadata.get(), name), "LlamaGLM synthetic stage fixture v1") == 0,
+            std::strcmp(gguf_get_val_str(metadata.get(), name), locked ? "LlamaGLM synthetic locked host fixture v1" :
+                "LlamaGLM synthetic stage fixture v1") == 0,
             "worker refuses non-fixture models");
     for (const auto & field : std::map<std::string, uint32_t>{{"block_count", 6}, {"embedding_length", 128},
             {"context_length", 256}, {"expert_count", 16}, {"expert_used_count", 8}}) {
@@ -68,7 +71,7 @@ static execution_identity fixture_identity(const std::string & path) {
         sha256({{header_data.data(), header_data.size()}})});
     value.tensors = report.tensors; value.payload_bytes = report.payload_bytes;
     value.target_layers = report.target_layers; value.nextn_layers = report.nextn_layers;
-    value.experts = 16; value.layer_ends = {2, 4, 6};
+    value.experts = 16; value.layer_ends = locked ? std::array<uint32_t, 3>{2,3,6} : std::array<uint32_t, 3>{2,4,6};
     value.bounds.hidden = 128; value.bounds.rows = 64; value.bounds.context = 256;
     value.bounds.frame_bytes = 64u << 10;
     return value;
@@ -86,15 +89,16 @@ int main(int argc, char ** argv) {
                     arg.first == "--storage", "unknown pipeline worker argument");
         }
         const auto storage_mode = args.count("--storage") ? args.at("--storage") : "buffered";
-        require(storage_mode == "buffered" || storage_mode == "streamed", "unknown fixture storage profile");
-        const bool streamed = storage_mode == "streamed";
+        require(storage_mode == "buffered" || storage_mode == "streamed" || storage_mode == "locked", "unknown fixture storage profile");
+        const bool locked = storage_mode == "locked";
+        const bool streamed = storage_mode != "buffered";
         const uint32_t rank = integer(args.at("--rank"), 2);
         const std::string model_path = args.at("--model");
         const std::string request_path = args.at("--requests");
         common_init();
         common_log_set_verbosity_thold(LOG_LEVEL_ERROR);
         llama_backend_init();
-        const auto agreed = fixture_identity(model_path);
+        const auto agreed = fixture_identity(model_path, locked);
         const auto identity = identity_digest(agreed);
         require(std::filesystem::file_size(request_path) <= 16384, "fixture requests exceed limit");
         std::ifstream requests_file(request_path);
@@ -102,6 +106,7 @@ int main(int argc, char ** argv) {
         const std::vector<uint32_t> expected_chunks{1,3,4,17,31,64,11};
         require(requests.at("version") == 1 && requests.at("context") == 256 && requests.at("hidden") == 128 &&
                 requests.at("vocab") == 128 && requests.at("chunks") == expected_chunks &&
+                requests.at("layer_ends") == json(agreed.layer_ends) &&
                 requests.at("microbatch") == (streamed ? 1 : 32), "invalid fixture request schema/profile");
         const auto & token_values = requests.at("tokens");
         require(token_values.is_array() && token_values.size() == 131, "invalid fixture token count");
@@ -137,32 +142,63 @@ int main(int argc, char ** argv) {
         params.lazy_mode = LLAMA_LAZY_MODE_OFF;
         params.progress_callback = [](float, void *) { return true; };
         const bool desktop_source = streamed && rank != 1;
+        const bool preloaded = locked && rank == 1;
+        params.use_extra_bufts = !locked;
+        std::optional<glm_fixture_lock_quota> quota;
+        if (preloaded) { quota.emplace(); }
         const llama_stage_storage_params storage{1,8,16u<<20,16u<<20,64,2};
+        const llama_stage_preload_params preload{2,8,2u<<20,8u<<20,4u<<20,64,0};
+        const auto & ends = agreed.layer_ends;
+        const llama_stage_model_params stage{1,rank,{ends[0],ends[1],ends[2]}};
         llama_model_ptr model(desktop_source ?
-            llama_model_load_stage_streamed_from_file(model_path.c_str(), params, {1,rank,{2,4,6}}, storage) :
-            llama_model_load_stage_from_file(model_path.c_str(), params, {1,rank,{2,4,6}}));
+            llama_model_load_stage_streamed_from_file(model_path.c_str(), params, stage, storage) : preloaded ?
+            llama_model_load_stage_preloaded_from_file(model_path.c_str(), params, stage, preload) :
+            llama_model_load_stage_from_file(model_path.c_str(), params, stage));
         require(bool(model), "owned fixture model failed to load");
         require(llama_model_n_layer(model.get()) == 6 && llama_model_n_embd(model.get()) == 128 &&
                 llama_vocab_n_tokens(llama_model_get_vocab(model.get())) == 128, "fixture model dimensions changed");
         const auto report_storage = [&](const char * phase) {
             llama_stage_storage_report report{}; report.version = 1;
             const bool has_source = llama_model_stage_storage_report(model.get(), &report);
-            require(has_source == desktop_source, "fixture worker has the wrong storage provider");
+            require(has_source == (desktop_source || preloaded), "fixture worker has the wrong storage provider");
             json evidence{{"version",1}, {"rank",rank}, {"phase",phase}, {"microbatch",streamed ? 1 : 32},
-                {"mode",desktop_source ? "desktop-streamed" : "buffered"}};
-            if (desktop_source) {
+                {"mode",desktop_source ? "desktop-streamed" : preloaded ? "host-preloaded" : "buffered"}};
+            if (has_source) {
                 require(report.streamed_tensors > 0 && report.routed_logical_bytes > 0 &&
                         report.model_buffer_bytes < llama_model_size(model.get()) && report.host_reserved_bytes <= storage.host_cache_bytes,
                         "streamed worker allocated full experts or exceeded its host cap");
                 const bool startup = std::strcmp(phase, "startup") == 0;
-                require(startup ? (report.native_read_requests == 0 && report.native_read_bytes == 0 && report.host_reserved_bytes == 0) :
-                        (report.native_read_requests > 0 && report.native_read_bytes > 0), "unexpected streamed worker source I/O");
+                if (desktop_source) {
+                    require(startup ? (report.native_read_requests == 0 && report.native_read_bytes == 0 && report.host_reserved_bytes == 0) :
+                            (report.native_read_requests > 0 && report.native_read_bytes > 0), "unexpected streamed worker source I/O");
+                }
                 evidence["streamed_tensors"] = report.streamed_tensors;
                 evidence["routed_logical_bytes"] = report.routed_logical_bytes;
                 evidence["model_buffer_bytes"] = report.model_buffer_bytes;
                 evidence["host_reserved_bytes"] = report.host_reserved_bytes;
                 evidence["native_read_requests"] = report.native_read_requests;
                 evidence["native_read_bytes"] = report.native_read_bytes;
+                if (preloaded) {
+                    llama_stage_preload_report experts{}; experts.version = 1;
+                    llama_stage_host_report host{}; host.version = 1;
+                    require(llama_model_stage_preload_report(model.get(), &experts) && llama_model_stage_host_report(model.get(), &host) &&
+                            experts.expert_slabs == 48 && !experts.open_source_files && !experts.full_residency_validated &&
+                            experts.payload_bytes == report.routed_logical_bytes && experts.startup_read_requests == 48 &&
+                            experts.startup_read_bytes == report.routed_logical_bytes && report.native_read_requests == 48 &&
+                            report.native_read_bytes == report.routed_logical_bytes && host.native_payload_locks_verified &&
+                            !host.full_residency_validated && !host.pending_buffers && !host.failures && host.tensor_buffers &&
+                            host.reserved_page_bytes > experts.locked_bytes && host.reserved_page_bytes <= preload.host_page_bytes &&
+                            (startup || !std::filesystem::exists(model_path)), "locked middle worker lost its preload/host policy or retained a source");
+                    evidence["expert_slabs"] = experts.expert_slabs;
+                    evidence["locked_expert_bytes"] = experts.locked_bytes;
+                    evidence["host_page_bytes"] = host.reserved_page_bytes;
+                    evidence["peak_host_page_bytes"] = host.peak_reserved_page_bytes;
+                    evidence["host_buffers"] = host.tensor_buffers;
+                    evidence["native_locks_verified"] = host.native_payload_locks_verified;
+                    evidence["full_residency_validated"] = host.full_residency_validated;
+                    evidence["open_source_files"] = experts.open_source_files;
+                    evidence["source_removed"] = !std::filesystem::exists(model_path);
+                }
             }
             std::printf("GLM_PIPELINE_STORAGE %s\n", evidence.dump().c_str());
             std::fflush(stdout);
@@ -195,7 +231,7 @@ int main(int argc, char ** argv) {
             const auto peer = authenticate_server(incoming, psk, {identity,rank-1,rank,channel::data}, shortly());
             rx = std::make_unique<receiver>(derive_link_key(psk, peer), peer, bounds);
         }
-        std::printf("GLM_PIPELINE_OWNED %u %u %u %llu\n", rank, 2*rank, 2*rank+2,
+        std::printf("GLM_PIPELINE_OWNED %u %u %u %llu\n", rank, rank ? ends[rank-1] : 0, ends[rank],
                 static_cast<unsigned long long>(llama_model_size(model.get())));
         std::fflush(stdout);
         erase_secret(psk);
@@ -236,9 +272,10 @@ int main(int argc, char ** argv) {
         require(bool(output), "cannot seal fixture worker output");
         report_storage("complete");
         llama_stage_bank_report bank{}; bank.version = 1;
-        require(llama_context_stage_bank_report(context.get(), &bank) == desktop_source, "wrong fixture bank report source");
-        if (desktop_source) {
-            require(bank.device_banks == 0 && bank.cpu_banks == (rank == 0 ? 1 : 2) && bank.buffer_bytes <= storage.context_bank_bytes &&
+        require(llama_context_stage_bank_report(context.get(), &bank) == (desktop_source || preloaded), "wrong fixture bank report source");
+        if (desktop_source || preloaded) {
+            require(bank.device_banks == 0 && bank.cpu_banks == (rank == 0 ? ends[0] - 1 : ends[rank] - ends[rank-1]) &&
+                    bank.buffer_bytes <= (preloaded ? preload.context_bank_bytes : storage.context_bank_bytes) &&
                     bank.materializations == uint64_t(bank.cpu_banks) * 131 && bank.slot_hits > 0 && bank.failures == 0 &&
                     bank.slot_hits + bank.slot_misses == bank.materializations * 8 && bank.copied_slabs == bank.slot_misses * 3,
                     "streamed worker did not reuse complete backend expert groups or reported inconsistent counters");

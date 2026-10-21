@@ -109,3 +109,7 @@ llama_context_stage_invalidate is an experimental side-header API for an owner w
 The local independent model oracle now invalidates A/B/C after valid history (including an already failed C), checks idempotent null outputs and failed retries after memory clearing, and requires unchanged bank materialization/copy counters on rejected retries. It then releases old contexts before allocation, recreates every owner with retained weights and compares the first token's two boundaries/logits against saved independent monolithic outputs. Buffered, streamed and source-deleted locked-host variants pass all seven GLM tests. Ordinary oracle outputs remain usable. Exact-source Windows qualification is pending.
 
 Invalidation suppresses future getter access; callers must discard any previously borrowed output pointers and any uncommitted copies. A local flag cannot retract data already delivered to a peer/client. Production output publication must follow the global commit protocol, which remains unimplemented.
+
+## Owner transaction metadata component
+
+The new stage-session owner ledger checks semantic retries, contiguous positions, complete three-owner commit certificates and newer reset epochs. It retains only fixed-size metadata and does not decode peers, authenticate receipts, execute models or cache replies. A local commit is insufficient for client publication; all three commit acknowledgements and coordinated uncertain-state reset remain unimplemented. See SESSION_LEDGER.md.

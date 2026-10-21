@@ -3,7 +3,7 @@
 | Capability | Status | Evidence/limit |
 | --- | --- | --- |
 | Source | PARTIAL | Planner, owned-layer evaluator, authenticated TCP and test-only three-process workers; no production coordinator |
-| Local CPU fixtures | CPU_FIXTURE_PASS | 11 CTest targets (9 planner cases, 12 wire/auth, 4 identity, 8 boundary-transfer, 12 storage/cache, 6 quantized-bank, 6 host-buffer and 8 TCP suites, three-process/missing-middle/changed-tokenizer cases); 7 GLM tests; 2 non-GLM tests |
+| Local CPU fixtures | CPU_FIXTURE_PASS | 12 CTest targets (6 session-ledger suites, 9 planner cases, 12 wire/auth, 4 identity, 8 boundary-transfer, 12 storage/cache, 6 quantized-bank, 6 host-buffer and 8 TCP suites, three-process/missing-middle/changed-tokenizer cases); 7 GLM tests; 2 non-GLM tests |
 | Real tensor descriptors | NATIVE_SCHEMA_LOCAL_PASS | All 1,412 descriptors and 120,358,051,192 logical bytes match native GLM/NextN tensor definitions; zero weight allocation/read; also passed all Windows jobs at a6138c7ec |
 | Windows compile | WINDOWS_COMPILE_PASS (CPU/SM89/SM120a) | 0cd4a9331, run 39555445703: 11 CTest targets including buffered and streamed three-process inference, 7 GLM CPU tests with desktop streaming, locked experts and shared KDA/DSA B host buffers and native real-header schema validation, including the 128 MiB bridge and fragmented model fixture |
 | Three-process TCP | THREE_PROCESS_CPU_FIXTURE_PASS | Actual A/B/C CPU processes, six synthetic layers, 131 tokens; GCC/MSVC boundaries/logits byte-exact |
@@ -15,7 +15,7 @@
 Local commands after a CPU CMake build:
 
 ```sh
-ctest --test-dir build -R '^(test-glm-stage|test-glm-plan|test-glm-storage|test-glm-host-buffer|test-glm-expert-bank|test-glm-wire|test-glm-identity|test-glm-boundary|test-glm-net|test-glm-pipeline|test-gguf)$' --output-on-failure
+ctest --test-dir build -R '^(test-glm-stage|test-glm-plan|test-glm-storage|test-glm-host-buffer|test-glm-expert-bank|test-glm-wire|test-glm-session|test-glm-identity|test-glm-boundary|test-glm-net|test-glm-pipeline|test-gguf)$' --output-on-failure
 build/bin/test-llama-archs --arch glm5-next --backend CPU --seed 53 -v 5
 ```
 
@@ -119,3 +119,15 @@ Source 69088253a8e1212448e1e42e5ce8ec62ea0329ef passes [Windows run 39559958784]
 llama_context_stage_invalidate is an experimental side-header API for an owner whose in-flight work has already stopped. It idempotently and permanently marks only that stage context failed, suppresses its output views and refuses further evaluation before expert work. Clearing memory cannot revive it; destroy/recreate the context against retained owned weights. Null/ordinary contexts return false. The call is not a running-work interrupt or distributed transaction/reset protocol; a future coordinator must stop/join work, invalidate every affected owner and establish a new epoch/replay before admission.
 
 The local independent model oracle now invalidates A/B/C after valid history (including an already failed C), checks idempotent null outputs and failed retries after memory clearing, and requires unchanged bank materialization/copy counters on rejected retries. It then releases old contexts before allocation, recreates every owner with retained weights and compares the first token's two boundaries/logits against saved independent monolithic outputs. Buffered, streamed and source-deleted locked-host variants pass all seven GLM tests. Ordinary oracle outputs remain usable. Exact-source Windows qualification is pending.
+
+
+## Native quiescent invalidation qualification
+
+Source e82dbd92f035b83b88d7c41102d6ab67d6b93902 passes [Windows run 39560949146](https://github.com/Protonburn35/LlamaGLM/actions/runs/39560949146): CPU/SM89/SM120a jobs 119091786864 / 119091786985 / 119091787046. Eleven CTest targets, seven GLM tests and native real-header schema pass. Downloaded CPU artifact 12327702399 (16,415,090 bytes) confirms all-owner quiescent invalidation, null outputs/failed retries after memory clearing, no expert work on retries and recreated retained-weight contexts matching independent monolithic outputs. All three process profiles remain exact. CUDA artifacts 12327399419 (126,255,130 bytes) / 12327164603 (146,415,327 bytes). These are local/hosted CPU lifecycle checks, not distributed cancellation/commit or GPU qualification.
+
+
+## Owner transaction metadata ledger
+
+Added a fixed-size, single-threaded owner ledger bound to rank and canonical execution identity. It tracks one pending step and one previous three-owner certificate independently of connection frame sequences. New/running/applied/committed dispositions prevent duplicate execution when callers respect the result. Valid steps require monotonic transaction/chunk IDs, contiguous bounded positions, complete session/epoch/generation and actual input fingerprints. A commit certificate requires exactly A/B/C, common coordinates/end position, and the A output/B input/C input digest chain; each owner matches its actual applied receipt before advancing local history. Valid conflicting retries invalidate the local epoch. Uncertain outcomes require real all-owner stop/invalidation/recreation and strictly newer epoch/generation before replay.
+
+Six local metadata suites cover retry/expiry, malformed bounds/identity/session/IDs, conflicts, missing/wrong owners and broken chains, structurally valid certificates contradicting actual local results, two locally committed owners followed by lost acknowledgement/reset of all three, and exact context capacity. The reusable CPU gate now passes twelve CTest targets plus seven GLM tests. These are metadata component checks, not a graph/transport commit protocol. Authenticated rank collection, fixed wire encoding, reply-cache budgets, all-owner commit acknowledgements/publication, terminal sampling/response cursors and production reset/replay remain absent. See SESSION_LEDGER.md. Exact-source native qualification of this component is pending.

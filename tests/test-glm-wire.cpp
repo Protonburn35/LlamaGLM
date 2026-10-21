@@ -1,4 +1,5 @@
 #include "stage-wire.h"
+#include "stage-auth.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -266,13 +267,120 @@ static void control_isolation() {
     refused([&] { tx.encode(f.metadata, f.body()); });
 }
 
+static void handshake_exchange() {
+    fixture f;
+    for (auto link : {channel::data, channel::control}) {
+        auth_identity expected{f.peer.identity, 0, 1, link};
+        server_auth server(f.psk, expected), fresh(f.psk, expected);
+        client_auth client(f.psk, expected);
+        refused([&] { client.agreed_binding(); });
+        refused([&] { server.agreed_binding(); });
+        const auto challenge = server.challenge();
+        require(challenge != fresh.challenge(), "server nonce repeated across connections");
+        const auto proof = client.answer_server(challenge);
+        const auto response = server.accept_client(proof);
+        refused([&] { client.agreed_binding(); });
+        client.accept_server(response);
+        const auto & a = client.agreed_binding();
+        const auto & b = server.agreed_binding();
+        require(equal_digest(a.server_nonce, b.server_nonce) && equal_digest(a.client_nonce, b.client_nonce) &&
+                equal_digest(a.identity, b.identity) && a.sender == b.sender && a.receiver == b.receiver && a.link == link,
+                "authenticated connection bindings differ");
+        sender tx(derive_link_key(f.psk, a), a, f.bounds);
+        receiver rx(derive_link_key(f.psk, b), b, f.bounds);
+        auto metadata = f.metadata;
+        if (link == channel::control) { metadata = {}; metadata.type = kind::heartbeat; }
+        const bytes_view body = link == channel::data ? f.body() : bytes_view{nullptr, 0};
+        require(rx.authenticate(prefix(tx.encode(metadata, body)), body).sequence == 1, "authenticated link could not exchange a frame");
+    }
+
+    // Independent Python struct/HMAC server-challenge vector, with no test-only RNG hook in production.
+    const std::string golden =
+        "4c4c474c4d4853310100000001010000010000000000000021212121212121212121212121212121"
+        "21212121212121212121212121212121000000000000000000000000000000000000000000000000"
+        "00000000000000006565656565656565656565656565656565656565656565656565656565656565"
+        "0000000000000000e83a0f089818698a7ed7b192c65fe060c0dd644525f5d642f649a5e54d4b8405";
+    require(golden.size() == 320, "invalid authentication golden fixture");
+    auth_message challenge;
+    for (size_t i = 0; i < challenge.size(); ++i) { challenge[i] = uint8_t(std::stoul(golden.substr(2*i, 2), nullptr, 16)); }
+    client_auth client(f.psk, {f.peer.identity, 0, 1, channel::data});
+    require(client.answer_server(challenge)[12] == 2, "independent challenge vector was refused");
+}
+
+static void handshake_corruption() {
+    fixture f;
+    const auth_identity expected{f.peer.identity, 0, 1, channel::data};
+    for (int phase = 0; phase < 3; ++phase) {
+        for (size_t byte = 0; byte < auth_message{}.size(); ++byte) {
+            server_auth server(f.psk, expected);
+            client_auth client(f.psk, expected);
+            const auto challenge = server.challenge();
+            auto changed = challenge;
+            if (phase == 0) {
+                changed[byte] ^= 1;
+                refused([&] { client.answer_server(changed); });
+                refused([&] { client.answer_server(challenge); });
+                continue;
+            }
+            const auto proof = client.answer_server(challenge);
+            changed = proof;
+            if (phase == 1) {
+                changed[byte] ^= 1;
+                refused([&] { server.accept_client(changed); });
+                refused([&] { server.accept_client(proof); });
+                refused([&] { server.agreed_binding(); });
+                continue;
+            }
+            const auto response = server.accept_client(proof);
+            changed = response;
+            changed[byte] ^= 1;
+            refused([&] { client.accept_server(changed); });
+            refused([&] { client.accept_server(response); });
+            refused([&] { client.agreed_binding(); });
+        }
+    }
+}
+
+static void handshake_replay() {
+    fixture f;
+    const auth_identity expected{f.peer.identity, 0, 1, channel::data};
+    server_auth server(f.psk, expected);
+    client_auth client(f.psk, expected);
+    const auto challenge = server.challenge();
+    const auto proof = client.answer_server(challenge);
+    const auto response = server.accept_client(proof);
+    client.accept_server(response);
+    refused([&] { client.accept_server(response); });
+    refused([&] { client.agreed_binding(); });
+    refused([&] { server.accept_client(proof); });
+    refused([&] { server.agreed_binding(); });
+    server_auth fresh(f.psk, expected);
+    refused([&] { fresh.accept_client(proof); });
+    server_auth another(f.psk, expected);
+    client_auth fresh_client(f.psk, expected);
+    fresh_client.answer_server(another.challenge());
+    refused([&] { fresh_client.accept_server(response); });
+    for (int change = 0; change < 4; ++change) {
+        auto key = f.psk;
+        auto wrong = expected;
+        if (change == 0) { key[0] ^= 1; }
+        if (change == 1) { wrong.identity[0] ^= 1; }
+        if (change == 2) { wrong.link = channel::control; }
+        if (change == 3) { wrong.client = 2; }
+        client_auth rejected(key, wrong);
+        refused([&] { rejected.answer_server(challenge); });
+        refused([&] { rejected.agreed_binding(); });
+    }
+}
+
 int main() {
     try {
         for (auto test : {crypto_vectors, binding_vectors, golden_frame, corruption_refusal,
-                          sequence_refusal, shape_refusal, preallocation_refusal, bounded_fragments, control_isolation}) {
+                          sequence_refusal, shape_refusal, preallocation_refusal, bounded_fragments, control_isolation,
+                          handshake_exchange, handshake_corruption, handshake_replay}) {
             test();
         }
-        std::puts("GLM wire: 9 suites passed; crypto vectors, framing, integrity, replay, limits and control isolation");
+        std::puts("GLM wire: 12 suites passed; crypto vectors, framing, mutual proof, integrity, replay, limits and control isolation");
         return 0;
     } catch (const std::exception & error) {
         std::fprintf(stderr, "GLM wire test failed: %s\n", error.what());

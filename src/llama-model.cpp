@@ -1920,7 +1920,25 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         }
     }
 
-    if (stage_source) { stage_source->finalize(ml.file_paths); }
+    float preload_share = 0.0f;
+    if (stage_preloaded && stage_source) {
+        llama_stage_storage_report report{}; report.version = 1;
+        stage_source->report(report);
+        uint64_t ordinary = 0;
+        for (const auto & entry : ml.ctx_map) {
+            for (auto * tensor = ggml_get_first_tensor(entry.second.get()); tensor; tensor = ggml_get_next_tensor(entry.second.get(), tensor)) {
+                const auto bytes = ggml_nbytes(tensor);
+                if (bytes > UINT64_MAX - ordinary) { throw std::overflow_error("stage progress byte count overflow"); }
+                ordinary += bytes;
+            }
+        }
+        const double total = double(report.routed_logical_bytes) + double(ordinary);
+        if (total > 0) { preload_share = float(double(report.routed_logical_bytes) / total); }
+        if (ordinary) { preload_share = std::min(preload_share, std::nextafter(1.0f, 0.0f)); }
+    }
+    if (stage_source && !stage_source->finalize(ml.file_paths, [&](float progress) {
+        return !params.progress_callback || params.progress_callback(progress * preload_share, params.progress_callback_user_data);
+    })) { return false; }
     ml.done_getting_tensors();
 
     if (per_layer_tok_embd && ml.lazy.has(per_layer_tok_embd)) {
@@ -2098,8 +2116,19 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     }
 
     // load tensor data
+    struct load_progress {
+        llama_progress_callback callback;
+        void * user_data;
+        float base;
+    } progress{params.progress_callback, params.progress_callback_user_data, preload_share};
+    const auto forward_progress = +[](float value, void * user_data) {
+        const auto & state = *static_cast<const load_progress *>(user_data);
+        return !state.callback || state.callback(state.base + (1.0f - state.base) * value, state.user_data);
+    };
     for (auto & [ctx, bufs] : ctx_bufs) {
-        if (!ml.load_all_data(ctx, bufs, use_mlock ? &pimpl->mlock_mmaps : NULL, params.progress_callback, params.progress_callback_user_data)) {
+        if (!ml.load_all_data(ctx, bufs, use_mlock ? &pimpl->mlock_mmaps : NULL,
+                stage_preloaded ? forward_progress : params.progress_callback,
+                stage_preloaded ? &progress : params.progress_callback_user_data)) {
             return false;
         }
     }

@@ -52,3 +52,6 @@
 
 
 - Route CPU backend direct and explicit-plan work buffers through an opt-in registry capability set once before use. Keep ordinary callers on their existing heap path and avoid changing stable public parameter layouts. Strict stage policy refuses a missing capability. Reserve replacement scratch before releasing old data, include both in peak capacity, and return allocation failure without fallback. Preserve real-model settings; only the separate small independent KDA/DSA CPU oracle uses one thread to fit test lock quota.
+
+
+- Reuse the model's existing progress callback for startup expert preload and ordinary weights, with logical byte weighting and no regression to zero between phases. Derive ordinary bytes from actual tensor descriptors before loader mapping initialization. Keep callbacks local to startup, honor cancellation before/after complete expert reads and at ordinary-load completion, and unwind all partial pages/readers before returning no model. Retain the separate requirement for native in-flight I/O cancellation/deadlines.

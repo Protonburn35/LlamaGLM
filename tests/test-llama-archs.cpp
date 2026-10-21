@@ -1041,6 +1041,23 @@ struct fixture_lock_quota {
 #endif
 };
 
+struct stage_load_progress {
+    std::vector<float> values;
+    size_t stop_call = 0;
+    float stop_value = 2.0f;
+    bool cancelled = false, invalid = false, forbidden = false;
+    static bool capture(float value, void * data) {
+        auto & state = *static_cast<stage_load_progress *>(data);
+        if (state.forbidden || !std::isfinite(value) || value < 0 || value > 1 ||
+                (!state.values.empty() && value < state.values.back())) { state.invalid = true; return false; }
+        state.values.push_back(value);
+        if ((state.stop_call && state.values.size() == state.stop_call) || value >= state.stop_value) {
+            state.cancelled = true; return false;
+        }
+        return true;
+    }
+};
+
 static void test_preloaded_stage_models(const std::filesystem::path & path, llama_model * reference,
         llama_model_params params, size_t seed) {
     [[maybe_unused]] fixture_lock_quota quota;
@@ -1110,10 +1127,13 @@ static void test_locked_host_stage_models(const std::filesystem::path & director
     for (const std::array<uint32_t, 3> ends : {std::array<uint32_t, 3>{2,3,6}, std::array<uint32_t, 3>{3,4,6}}) {
         const auto middle_path = directory / "locked host middle.gguf";
         std::filesystem::copy_file(path, middle_path);
+        stage_load_progress progress;
         std::array<llama_model_ptr, 3> models;
         for (uint32_t rank = 0; rank < 3; ++rank) {
             const llama_stage_model_params stage{1,rank,{ends[0],ends[1],ends[2]}};
-            models[rank].reset(rank == 1 ? llama_model_load_stage_preloaded_from_file(middle_path.string().c_str(), params, stage, preload) :
+            auto rank_params = params;
+            rank_params.progress_callback = stage_load_progress::capture; rank_params.progress_callback_user_data = &progress;
+            models[rank].reset(rank == 1 ? llama_model_load_stage_preloaded_from_file(middle_path.string().c_str(), rank_params, stage, preload) :
                 llama_model_load_stage_from_file(path.string().c_str(), params, stage));
             if (!models[rank]) { throw std::runtime_error("cannot load locked host stage model"); }
         }
@@ -1125,6 +1145,13 @@ static void test_locked_host_stage_models(const std::filesystem::path & director
                 startup.expert_page_bytes != experts.locked_bytes || startup.reserved_page_bytes <= startup.expert_page_bytes) {
             throw std::runtime_error("locked ordinary weights and experts lack complete shared page accounting");
         }
+        const size_t startup_calls = progress.values.size();
+        const float expected_share = float(double(experts.payload_bytes) / double(llama_model_size(models[1].get())));
+        if (progress.invalid || startup_calls <= 49 || progress.values.front() != 0 || progress.values.back() != 1 ||
+                std::abs(progress.values[48] - expected_share) > 1e-6f || progress.values[48] >= 1) {
+            throw std::runtime_error("preload progress omitted raw experts, regressed or completed before ordinary weights");
+        }
+        progress.forbidden = true;
         for (const auto & entry : models[1]->tensors_by_name) {
             const auto * tensor = entry.second;
             if (entry.first.find("_exps.weight") != std::string::npos) { continue; }
@@ -1134,6 +1161,7 @@ static void test_locked_host_stage_models(const std::filesystem::path & director
         }
         if (!std::filesystem::remove(middle_path)) { throw std::runtime_error("locked host model retained its source file"); }
         test_owned_stage_forward(reference.get(), models, seed, 1, 1);
+        if (progress.invalid || progress.values.size() != startup_calls) { throw std::runtime_error("inference invoked a startup progress callback"); }
         llama_stage_host_report after{}; after.version = 1;
         llama_stage_preload_report final_experts{}; final_experts.version = 1;
         if (!llama_model_stage_host_report(models[1].get(), &after) || after.reserved_page_bytes != startup.reserved_page_bytes ||
@@ -1161,6 +1189,28 @@ static void test_locked_host_stage_models(const std::filesystem::path & director
         LOG("Stage locked host: B layer %u, startup %llu bytes, peak %llu bytes, source removed, complete 131-token oracle; full admission NOT_VALIDATED\n",
             ends[0], (unsigned long long)startup_bytes, (unsigned long long)after.peak_reserved_page_bytes);
     }
+    for (uint32_t version : {1u, 2u}) {
+        for (const size_t stop : {size_t(1), size_t(6), size_t(49), size_t(54), size_t(0)}) {
+            stage_load_progress progress;
+            progress.stop_call = stop;
+            if (!stop) { progress.stop_value = 1.0f; }
+            auto cancel_params = params;
+            cancel_params.progress_callback = stage_load_progress::capture; cancel_params.progress_callback_user_data = &progress;
+            auto policy = preload; policy.version = version;
+            const auto cancel_path = directory / "cancelled preload.gguf";
+            std::filesystem::copy_file(path, cancel_path);
+            llama_model_ptr cancelled(llama_model_load_stage_preloaded_from_file(cancel_path.string().c_str(), cancel_params, {1,1,{2,3,6}}, policy));
+            if (cancelled || !progress.cancelled || progress.invalid || !std::filesystem::remove(cancel_path)) {
+                throw std::runtime_error("startup cancellation exposed a model, ignored progress or retained a file reader");
+            }
+            llama_model_ptr recovered(llama_model_load_stage_preloaded_from_file(path.string().c_str(), params, {1,1,{2,3,6}}, policy));
+            llama_stage_preload_report report{}; report.version = 1;
+            if (!recovered || !llama_model_stage_preload_report(recovered.get(), &report) || report.expert_slabs != 48 || report.open_source_files) {
+                throw std::runtime_error("cancelled startup leaked resources needed by a complete reload");
+            }
+        }
+    }
+    LOG("Stage preload progress: weighted monotonic startup only; v1/v2 cancellation before reads, mid/preload end, ordinary load and completion frees readers and permits full reload\n");
     for (int failure = 0; failure < 2; ++failure) {
         auto bad = params;
         const llama_model_tensor_buft_override overrides[] = {{".*", ggml_backend_cpu_buffer_type()}, {nullptr, nullptr}};

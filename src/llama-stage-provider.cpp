@@ -34,6 +34,8 @@ ggml_backend_buffer_type_t llama_model::stage_buffer_type(ggml_backend_buffer_ty
 
 namespace {
 
+struct stage_preload_cancelled {};
+
 struct stage_layer_source {
     std::array<ggml_tensor *, 3> logical{};
     std::array<glm_stage::expert_projection, 3> specs{};
@@ -72,7 +74,8 @@ struct preloaded_reader final : stage_expert_reader {
     glm_stage::file_read_stats startup{};
     llama_stage_preload_report snapshot{};
     preloaded_reader(std::vector<std::shared_ptr<glm_stage::expert_file>> files,
-            const std::vector<glm_stage::expert_address> & catalog, const llama_stage_storage_params & params, uint64_t page_budget) {
+            const std::vector<glm_stage::expert_address> & catalog, const llama_stage_storage_params & params, uint64_t page_budget,
+            const std::function<bool(float)> & progress) {
         const std::set<glm_stage::expert_address> unique(catalog.begin(), catalog.end());
         if (unique.size() != catalog.size() || catalog.size() > params.host_cache_entries) {
             throw std::invalid_argument("complete locked expert catalog exceeds entry budget or contains duplicates");
@@ -90,10 +93,14 @@ struct preloaded_reader final : stage_expert_reader {
             payload += address.bytes; pages += rounded;
             previous_file = address.file; end = address.offset + address.bytes;
         }
+        if (progress && !progress(0.0f)) { throw stage_preload_cancelled{}; }
         memory = std::make_shared<glm_stage::memory_experts>(params.host_cache_bytes, params.host_cache_entries, page_budget);
+        uint64_t done = 0;
         for (const auto & address : catalog) {
             const auto file = files[address.file];
             memory->preload_with(address, [file,address](uint8_t * output, size_t bytes) { file->read_exact(address.offset, output, bytes); });
+            done += address.bytes;
+            if (progress && !progress(float(double(done) / double(payload)))) { throw stage_preload_cancelled{}; }
         }
         memory->seal(catalog);
         memory->verify_payload_locks();
@@ -240,7 +247,7 @@ struct stage_weight_source final : llama_stage_weight_source, std::enable_shared
         for (int64_t expert = 0; expert < tensor->ne[2]; ++expert) { spec.experts.push_back({file, offset + uint64_t(expert) * bytes, bytes}); }
         return tensor;
     }
-    void finalize(const std::vector<std::string> & paths) override {
+    bool finalize(const std::vector<std::string> & paths, const std::function<bool(float)> & progress) override {
         if (finalized) { throw std::runtime_error("streamed model source was finalized twice"); }
         const uint32_t begin = model.stage.rank == 0 ? 0 : model.stage.layer_ends[model.stage.rank - 1];
         const uint32_t end = model.stage.layer_ends[model.stage.rank];
@@ -269,18 +276,24 @@ struct stage_weight_source final : llama_stage_weight_source, std::enable_shared
                     if (rounded > page_budget - pages) { throw std::invalid_argument("expert pages exceed shared host capacity"); }
                     pages += rounded;
                 }
-                const auto owner = host_pool->preload_external_pages(pages, [&] {
-                    return std::make_shared<preloaded_reader>(std::move(files), catalog, params, page_budget);
-                }, +[](const void * pointer) -> uint64_t {
-                    const auto & preload = *static_cast<const preloaded_reader *>(pointer);
-                    preload.memory->verify_payload_locks(); return preload.memory->locked_bytes();
-                });
-                reader = std::static_pointer_cast<preloaded_reader>(owner);
+                try {
+                    const auto owner = host_pool->preload_external_pages(pages, [&] {
+                        return std::make_shared<preloaded_reader>(std::move(files), catalog, params, page_budget, progress);
+                    }, +[](const void * pointer) -> uint64_t {
+                        const auto & preload = *static_cast<const preloaded_reader *>(pointer);
+                        preload.memory->verify_payload_locks(); return preload.memory->locked_bytes();
+                    });
+                    reader = std::static_pointer_cast<preloaded_reader>(owner);
+                } catch (const stage_preload_cancelled &) { return false; }
             }
-            else if (page_budget) { reader = std::make_shared<preloaded_reader>(std::move(files), catalog, params, page_budget); }
+            else if (page_budget) {
+                try { reader = std::make_shared<preloaded_reader>(std::move(files), catalog, params, page_budget, progress); }
+                catch (const stage_preload_cancelled &) { return false; }
+            }
             else { reader = std::make_shared<desktop_reader>(model.stage.rank, std::move(files), catalog, params); }
         }
         finalized = true;
+        return true;
     }
     void append_tensors(std::vector<std::pair<std::string, ggml_tensor *>> & output) const override {
         for (const auto & layer : layers) {

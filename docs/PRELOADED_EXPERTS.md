@@ -23,3 +23,6 @@ Local qualification adds a separate small F32 model with FFN 64/shared 32 and fo
 
 
 Policy 2 passes native Windows in all variants at 0cd4a9331 (seven GLM tests, five host suites), run 39555445703. Its next follow-up also configures CPU work_data and explicit-plan scratch through the shared pool before backend use, with failure on missing support. The small KDA/DSA fixture uses one thread to fit actual flash-attention scratch below native test quotas; both independent 131-token oracles remain byte-exact. This scratch follow-up awaits native Windows qualification. Full residency remains false for metadata/control/network/staging and physical GPU resources.
+
+
+The existing model progress callback now covers expert preload and ordinary weights on one byte-weighted monotonic scale. It may cancel before the first expert read or after each complete expert slab, and ordinary loading still honors cancellation through final completion. The startup callback is not stored in the inference reader. Cancellation releases partial locks/reservations and file readers and returns no model. Ten local v1/v2 cancellation/reload cases and inference-with-no-callback checks pass. Current native reads remain synchronous: this does not implement interruption/deadlines inside an in-flight slab read.

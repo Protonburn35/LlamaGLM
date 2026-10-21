@@ -11,6 +11,7 @@
 #include <cstring>
 #include <future>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 using namespace glm_stage;

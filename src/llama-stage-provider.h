@@ -5,6 +5,7 @@
 #include "ggml-backend.h"
 
 #include <map>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -26,7 +27,7 @@ struct llama_stage_context_experts {
 struct llama_stage_weight_source {
     virtual ~llama_stage_weight_source() = default;
     virtual ggml_tensor * register_tensor(const LLM_TN_IMPL & name, const ggml_tensor * descriptor, uint16_t file, uint64_t offset) = 0;
-    virtual void finalize(const std::vector<std::string> & paths) = 0;
+    virtual bool finalize(const std::vector<std::string> & paths, const std::function<bool(float)> & progress) = 0;
     virtual void append_tensors(std::vector<std::pair<std::string, ggml_tensor *>> & output) const = 0;
     virtual bool empty() const = 0;
     virtual uint32_t slots() const = 0;

@@ -19,6 +19,7 @@
 struct llama_model;
 class llama_batch_allocr;
 class llama_moe_cache;
+struct llama_stage_context_experts;
 
 class llama_io_read_i;
 class llama_io_write_i;
@@ -397,6 +398,7 @@ private:
 
     ggml_backend_t backend_cpu = nullptr;
     std::vector<ggml_backend_ptr> backends;
+    std::unique_ptr<llama_stage_context_experts> stage_experts;
 
     // training
     ggml_opt_context_t opt_ctx = nullptr;

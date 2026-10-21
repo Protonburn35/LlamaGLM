@@ -14,6 +14,28 @@ struct llama_stage_model_params {
     uint32_t layer_ends[3];  // exclusive ends of three nonempty contiguous target ranges
 };
 
+struct llama_stage_storage_params {
+    uint32_t version;              // must be 1
+    uint32_t bank_slots;           // at least all selected experts; no clipping or implicit waves
+    uint64_t host_cache_bytes;     // raw desktop expert payload reservation
+    uint64_t context_bank_bytes;   // aggregate backend bank allocation cap per context
+    uint32_t host_cache_entries;   // 1..4096
+    uint32_t max_active_reads;     // 1..8
+};
+
+struct llama_stage_storage_report {
+    uint32_t version; // caller initializes to 1
+    uint32_t streamed_tensors;
+    uint64_t routed_logical_bytes;
+    uint64_t model_buffer_bytes;
+    uint64_t host_reserved_bytes;
+    uint64_t native_read_requests;
+    uint64_t native_system_reads;
+    uint64_t native_read_bytes;
+};
+
+LLAMA_API bool llama_model_stage_storage_report(const struct llama_model * model, struct llama_stage_storage_report * report);
+
 struct llama_stage_schema_report {
     uint32_t version; // caller must initialize to 1
     uint32_t tensors;
@@ -36,6 +58,15 @@ LLAMA_API struct llama_model * llama_model_load_stage_from_file(
         struct llama_model_params params,
         struct llama_stage_model_params stage);
 
+// Experimental desktop ranks 0/2 only; requires LLAMA_GLM_RPC and buffered NONE/lazy OFF.
+// Dense/shared weights load normally. Routed expert descriptors remain unallocated until bank fills.
+// Does not establish resource admission or residency. No MTP/LoRA/tensor split/full-payload check.
+LLAMA_API struct llama_model * llama_model_load_stage_streamed_from_file(
+        const char * path_model,
+        struct llama_model_params params,
+        struct llama_stage_model_params stage,
+        struct llama_stage_storage_params storage);
+
 // Synthetic/custom tensor source equivalent, used for owned-weight qualification.
 LLAMA_API struct llama_model * llama_model_init_stage_from_user(
         struct gguf_context * metadata,
@@ -46,6 +77,9 @@ LLAMA_API struct llama_model * llama_model_init_stage_from_user(
 
 // Full model context by default, FP16 MLA/index caches, one sequence, no speculation.
 LLAMA_API struct llama_context_params llama_stage_context_default_params(void);
+
+// Same context/precision defaults, with an explicit microbatch fitting this model's expert banks.
+LLAMA_API struct llama_context_params llama_stage_context_default_params_for_model(const struct llama_model * model);
 
 // A/B output every four-stream FP32 residual row through llama_get_embeddings.
 // B/C consume embedding rows at llama_model_n_embd_inp width; C outputs normal logits.

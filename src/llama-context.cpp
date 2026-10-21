@@ -9,6 +9,7 @@
 #include "llama-memory.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
+#include "llama-stage-provider.h"
 #include "llama-moe-cache.h"
 #include "llama-ext.h"
 #include "llama-sampler.h"
@@ -554,6 +555,7 @@ llama_context::llama_context(
         if (cparams.moe_cache_size > 0) {
             moe_cache = std::make_unique<llama_moe_cache>(model, backend_ptrs, backend_buft, cparams.moe_cache_size);
         }
+        if (model.stage_source) { stage_experts = model.stage_source->create_context(backend_ptrs); }
 
         sched_reserve();
 
@@ -1837,6 +1839,7 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
     }
 
     if (model.stage_enabled) {
+        if (stage_experts && stage_experts->failed()) { stage_failed = true; }
         if (stage_failed || batch_inp.tokens.size() > cparams.n_batch) {
             LLAMA_LOG_ERROR("%s: failed stage context or batch exceeds stage capacity; recreate failed contexts\n", __func__);
             return -1;
@@ -2734,6 +2737,7 @@ llm_graph_params llama_context::graph_params(
         /*.mctx        =*/ mctx,
         /*.cross       =*/ &cross,
         /*.moe_cache   =*/ moe_cache.get(),
+        /*.stage_experts =*/ stage_experts.get(),
         /*.prec_policy =*/ &model.prec_policy,
         /*.hdmd        =*/ model.hdmd.rot.empty() ? nullptr : &model.hdmd,
         /*.samplers    =*/ sampling.samplers,
@@ -2784,6 +2788,14 @@ ggml_status llama_context::graph_compute(
     copy_experts.reset();
 
     auto status = ggml_backend_sched_graph_compute_async(sched.get(), gf);
+    if (stage_experts) {
+        ggml_backend_sched_synchronize(sched.get());
+        if (stage_experts->failed()) {
+            try { LLAMA_LOG_ERROR("%s: streamed expert computation failed: %s\n", __func__, stage_experts->error().c_str()); }
+            catch (...) { LLAMA_LOG_ERROR("%s: streamed expert computation failed\n", __func__); }
+            status = GGML_STATUS_FAILED;
+        }
+    }
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: ggml_backend_sched_graph_compute_async failed with error %d\n", __func__, status);
     }
@@ -3746,6 +3758,9 @@ llama_memory_breakdown llama_context::memory_breakdown() const {
             ret[buft].context += size;
         }
     }
+    if (stage_experts) {
+        for (const auto & [buft, size] : stage_experts->memory_breakdown()) { ret[buft].context += size; }
+    }
     if (model.hparams.no_alloc) {
         for (size_t i = 0; i < backends.size(); ++i) {
             ggml_backend_t             backend = backends[i].get();
@@ -4062,6 +4077,18 @@ llama_context_params llama_stage_context_default_params() {
     return params;
 }
 
+llama_context_params llama_stage_context_default_params_for_model(const llama_model * model) {
+    auto params = llama_stage_context_default_params();
+    if (model && model->stage_source && !model->stage_source->empty()) {
+        params.n_ubatch = model->stage_source->slots() / model->hparams.n_expert_used_max();
+        for (uint32_t layer = 0; layer < model->hparams.n_layer(); ++layer) {
+            if (model->stage_owns_layer(layer) && layer >= model->hparams.n_layer_dense_lead &&
+                    ggml_backend_dev_type(model->dev_layer(layer)) == GGML_BACKEND_DEVICE_TYPE_CPU) { params.op_offload = false; }
+        }
+    }
+    return params;
+}
+
 static llama_context * llama_init_from_model_impl(
                  llama_model * model,
         llama_context_params   params, bool allow_stage) {
@@ -4188,6 +4215,20 @@ llama_context * llama_init_stage_from_model(llama_model * model, llama_context_p
             (params.n_ctx == 0 ? model->hparams.n_ctx_train : params.n_ctx) > 1048576) {
         LLAMA_LOG_ERROR("%s: unsupported stage context; use a loaded stage, one sequence, FP16 cache and non-speculative causal decoding\n", __func__);
         return nullptr;
+    }
+    if (model->stage_source && !model->stage_source->empty()) {
+        if (params.n_ubatch == 0 || uint64_t(params.n_ubatch) * model->hparams.n_expert_used_max() > model->stage_source->slots() ||
+                params.moe_cache_size != 0 || !model->loras.empty()) {
+            LLAMA_LOG_ERROR("%s: streamed experts require an explicit fitting microbatch and no competing MoE cache/LoRA; use model-specific stage defaults\n", __func__);
+            return nullptr;
+        }
+        for (uint32_t layer = 0; layer < model->hparams.n_layer(); ++layer) {
+            if (model->stage_owns_layer(layer) && layer >= model->hparams.n_layer_dense_lead && params.op_offload &&
+                    ggml_backend_dev_type(model->dev_layer(layer)) == GGML_BACKEND_DEVICE_TYPE_CPU) {
+                LLAMA_LOG_ERROR("%s: host expert banks require op_offload=false to prevent stale weight snapshots\n", __func__);
+                return nullptr;
+            }
+        }
     }
     for (uint32_t layer = 0; layer < model->hparams.n_layer(); ++layer) {
         if (!model->hparams.is_recr(layer) && !model->hparams.is_indexer_full(layer)) {
@@ -4439,6 +4480,10 @@ int32_t llama_set_adapters_lora(
             llama_adapter_lora ** adapters,
             size_t n_adapters,
             float * scales) {
+    if (ctx->get_model().stage_streamed && n_adapters != 0) {
+        LLAMA_LOG_ERROR("%s: LoRA is not supported by streamed stages\n", __func__);
+        return -1;
+    }
     if (adapters == nullptr || scales == nullptr) {
         GGML_ASSERT(n_adapters == 0 && "invalid llama_set_adapters_lora call");
     }

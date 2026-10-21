@@ -2,7 +2,7 @@
 
 | Platform | Toolchain | Target | Execution evidence |
 | --- | --- | --- | --- |
-| Cloud Linux x86_64 | GCC 14.2, CMake 3.31.6, Ninja 1.11.1.4, AVX2 | Planner, native schema, ownership, authenticated transport/identity/bridge and three-process GLM fixture | Ten CTest plus four GLM tests pass; no GPU |
+| Cloud Linux x86_64 | GCC 14.2, CMake 3.31.6, Ninja 1.11.1.4, AVX2 | Planner, native schema, ownership, authenticated transport/identity/bridge, three-process GLM and complete streamed-model fixtures | Ten CTest plus five GLM tests pass; minimal streaming-disabled library build passes; no GPU |
 | Windows Server 2022 x64 CPU | MSVC 19.44.35229.0, static llama libraries, Ninja | Planner, real llama-server/llama-cli, ownership/GGUF/GLM tests | PASS at 8e1820a0d, run 39536620843; ten CTest/four GLM/native real-header checks |
 | Windows Server 2022 x64 CUDA SM89 | Verified NVIDIA 12.8.1 components, pinned CCCL v3.4.3 commit | Same targets plus actual CUDA backend, 89-real, FP16/BF16 attention cache variants | Compile/link and hosted CPU fixtures PASS at 8e1820a0d; GPU NOT_RUN |
 | Windows Server 2022 x64 CUDA SM120 | Same pinned toolchain | Same targets, 120a-real, FP16/BF16 attention cache variants | Compile/link and hosted CPU fixtures PASS at 8e1820a0d; GPU NOT_RUN |

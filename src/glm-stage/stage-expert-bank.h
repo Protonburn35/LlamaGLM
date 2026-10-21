@@ -40,6 +40,9 @@ public:
     expert_bank(const expert_bank &) = delete;
     expert_bank & operator=(const expert_bank &) = delete;
     uint64_t buffer_bytes() const;
+    static bool supports_type(ggml_type type);
+    // Metadata for graph construction; execution must depend on materialization and retain its lease.
+    ggml_tensor * projection_for_graph(size_t index) const;
     // Preserves selected order/duplicates. Excess distinct IDs refuse; no routing clipping or waves.
     // Any materialization failure invalidates this bank. Busy banks refuse without overwriting leases.
     lease materialize(const std::vector<int32_t> & selected);

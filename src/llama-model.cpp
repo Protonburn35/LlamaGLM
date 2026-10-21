@@ -7,6 +7,7 @@
 #include "llama-mmap.h"
 #include "llama-cparams.h"
 #include "llama-model-loader.h"
+#include "llama-stage-provider.h"
 
 #include "llama-kv-cache.h"
 #include "llama-kv-cache-iswa.h"
@@ -1742,6 +1743,8 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     // assign the output layer
     pimpl->dev_output = get_layer_buft_list(n_layer_all);
 
+    if (stage_streamed) { stage_source = llama_stage_make_weight_source(*this, stage_storage); }
+
     const auto TENSOR_NOT_REQUIRED = llama_model_loader::TENSOR_NOT_REQUIRED;
 
     // create tensors for the weights
@@ -1914,6 +1917,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         }
     }
 
+    if (stage_source) { stage_source->finalize(ml.file_paths); }
     ml.done_getting_tensors();
 
     if (per_layer_tok_embd && ml.lazy.has(per_layer_tok_embd)) {
@@ -1934,6 +1938,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             tensors_by_name.emplace_back(ggml_get_name(cur), cur);
         }
     }
+    if (stage_source) { stage_source->append_tensors(tensors_by_name); }
     if (stage_enabled) {
         pimpl->n_bytes = 0;
         pimpl->n_elements = 0;
@@ -1946,7 +1951,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             pimpl->n_bytes += bytes;
             pimpl->n_elements += elements;
         }
-        LLAMA_LOG_INFO("%s: stage %u owns %zu tensors, %zu payload bytes\n",
+        LLAMA_LOG_INFO("%s: stage %u owns %zu tensors, %zu logical payload bytes\n",
                        __func__, stage.rank, tensors_by_name.size(), pimpl->n_bytes);
     }
 
@@ -2443,6 +2448,13 @@ ggml_tensor * llama_model_base::create_tensor(llama_model_loader & ml, const LLM
     if (tn.bid != -1) {
         // blocks that are not model layers (e.g. the blocks of a head) go with the output
         buft_list_layer = (size_t) tn.bid < pimpl->dev_layer.size() ? pimpl->dev_layer.at(tn.bid).buft_list : pimpl->dev_output.buft_list;
+    }
+    if (stage_source && llama_stage_expert_projection(tn) >= 0 && !(flags & TENSOR_SKIP) && stage_owns_layer(tn.bid)) {
+        const auto * weight = ml.get_weight(tn.str().c_str());
+        if (!weight) { throw std::runtime_error("owned streamed expert descriptor is absent"); }
+        ml.create_tensor(hparams, &pimpl->cpu_buft_list, pimpl->dev_input.buft_list, pimpl->dev_output.buft_list,
+                         buft_list_layer, tn, ne, flags | TENSOR_SKIP);
+        return stage_source->register_tensor(tn, weight->tensor, weight->idx, weight->offs);
     }
     return ml.create_tensor(
         hparams, &pimpl->cpu_buft_list, pimpl->dev_input.buft_list, pimpl->dev_output.buft_list, buft_list_layer,

@@ -13,6 +13,7 @@
 #include "../src/llama-model.h"
 #include "../src/llama-model-saver.h"
 #include "../src/llama-memory-hybrid-idx.h"
+#include "../src/llama-stage-provider.h"
 
 #include <array>
 #include <cinttypes>
@@ -668,11 +669,12 @@ static double stage_compare(const float * actual, const std::vector<float> & exp
     return max_error;
 }
 
-static void test_owned_stage_forward(llama_model * reference, const std::array<llama_model_ptr, 3> & models, size_t seed) {
+static void test_owned_stage_forward(llama_model * reference, const std::array<llama_model_ptr, 3> & models, size_t seed, uint32_t microbatch = 32) {
     auto params = llama_stage_context_default_params();
     if (params.n_ctx != 0) { throw std::runtime_error("stage defaults silently shorten the context"); }
     params.n_batch = 64;
-    params.n_ubatch = 32;
+    params.n_ubatch = microbatch;
+    if (models[0]->stage_streamed || models[2]->stage_streamed) { params.op_offload = false; }
     params.n_threads = params.n_threads_batch = 4;
     stage_boundaries boundaries;
     for (size_t rank = 0; rank < 2; ++rank) {
@@ -945,6 +947,119 @@ static void test_stage_schema(const std::filesystem::path & path, uint64_t expec
     LOG("Stage schema: native no-allocation validation, full byte inventory and nine malformed descriptor/geometry cases passed\n");
 }
 
+#ifdef LLAMA_GLM_STAGE_STORAGE
+static void test_streamed_callback_failure(llama_model * model) {
+    ggml_backend_ptr backend(ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr));
+    if (!backend) { throw std::runtime_error("cannot initialize streamed callback test backend"); }
+    auto provider = model->stage_source->create_context({backend.get()});
+    ggml_context_ptr graph(ggml_init({8 * ggml_tensor_overhead() + ggml_graph_overhead_custom(8, false), nullptr, true}));
+    if (!provider || !graph) { throw std::runtime_error("cannot initialize streamed callback failure fixture"); }
+    int layer = -1;
+    for (const auto & tensor : model->tensors_by_name) {
+        if (provider->owns(tensor.second) && std::sscanf(tensor.first.c_str(), "blk.%d.", &layer) == 1) { break; }
+    }
+    if (layer < 0) { throw std::runtime_error("streamed callback fixture has no routed layer"); }
+    auto * selected = ggml_new_tensor_1d(graph.get(), GGML_TYPE_I32, 8);
+    auto * remapped = provider->build_slots(graph.get(), selected, layer);
+    auto * computation = ggml_new_graph_custom(graph.get(), 8, false);
+    ggml_build_forward_expand(computation, remapped);
+    ggml_backend_buffer_ptr buffer(ggml_backend_alloc_ctx_tensors(graph.get(), backend.get()));
+    if (!buffer) { throw std::runtime_error("cannot allocate streamed callback failure fixture"); }
+    llama_stage_storage_report before{}; before.version = 1;
+    if (!llama_model_stage_storage_report(model, &before)) { throw std::runtime_error("missing streamed source report"); }
+    std::array<int32_t, 8> ids{-1,1,2,3,4,5,6,7};
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        ggml_backend_tensor_set(selected, ids.data(), 0, sizeof(ids));
+        if (ggml_backend_graph_compute(backend.get(), computation) != GGML_STATUS_SUCCESS || !provider->failed() || provider->error().empty()) {
+            throw std::runtime_error("streamed callback failure escaped its worker or did not permanently poison the provider");
+        }
+        std::array<int32_t, 8> output;
+        ggml_backend_tensor_get(remapped, output.data(), 0, sizeof(output));
+        if (output != std::array<int32_t, 8>{}) { throw std::runtime_error("failed streamed callback exposed partial slot IDs"); }
+        ids[0] = 0;
+    }
+    llama_stage_storage_report after{}; after.version = 1;
+    if (!llama_model_stage_storage_report(model, &after) || after.native_read_requests != before.native_read_requests) {
+        throw std::runtime_error("invalid/poisoned streamed callback performed source reads");
+    }
+}
+
+static void test_streamed_stage_models(const std::filesystem::path & path, llama_model * reference,
+        llama_model_params params, size_t seed) {
+    llama_stage_storage_params storage{1, 8, 0, 1u << 20, 64, 2};
+    uint64_t largest_expert = 0;
+    for (const auto & tensor : reference->tensors_by_name) {
+        if (tensor.first.find("_exps.weight") == std::string::npos) { continue; }
+        largest_expert = std::max<uint64_t>(largest_expert, tensor.second->nb[2]);
+        storage.context_bank_bytes += tensor.second->nb[2] * storage.bank_slots;
+    }
+    storage.host_cache_bytes = largest_expert * storage.host_cache_entries;
+    std::array<llama_model_ptr, 3> models;
+    for (uint32_t rank = 0; rank < 3; ++rank) {
+        const llama_stage_model_params stage{1, rank, {2,4,6}};
+        models[rank].reset(rank == 1 ? llama_model_load_stage_from_file(path.string().c_str(), params, stage) :
+            llama_model_load_stage_streamed_from_file(path.string().c_str(), params, stage, storage));
+        if (!models[rank]) { throw std::runtime_error("streamed stage model failed to load"); }
+        llama_stage_storage_report report{}; report.version = 1;
+        if (rank == 1) {
+            if (models[rank]->stage_streamed || llama_model_stage_storage_report(models[rank].get(), &report)) {
+                throw std::runtime_error("laptop acquired a streamed weight source");
+            }
+            continue;
+        }
+        uint64_t routed = 0;
+        uint32_t deferred = 0;
+        for (const auto & tensor : models[rank]->tensors_by_name) {
+            const bool expert = tensor.first.find("_exps.weight") != std::string::npos;
+            if (expert) {
+                if (tensor.second->data || tensor.second->buffer) { throw std::runtime_error("streamed model allocated whole routed weight tensors"); }
+                routed += ggml_nbytes(tensor.second); ++deferred;
+            } else if (!tensor.second->data) { throw std::runtime_error("streaming omitted a dense/shared/global owned weight"); }
+        }
+        if (!llama_model_stage_storage_report(models[rank].get(), &report) || report.streamed_tensors != deferred || deferred == 0 ||
+                report.routed_logical_bytes != routed || report.native_read_requests || report.native_read_bytes || report.host_reserved_bytes ||
+                report.model_buffer_bytes >= llama_model_size(models[rank].get())) {
+            throw std::runtime_error("streamed startup read/allocated routed payloads or reported incorrect ownership");
+        }
+        const auto defaults = llama_stage_context_default_params_for_model(models[rank].get());
+        if (defaults.n_ctx != 0 || defaults.n_ubatch != 1 || defaults.op_offload) { throw std::runtime_error("streamed stage defaults hide context/bank policy"); }
+        auto too_large = defaults; too_large.n_ubatch = 2;
+        llama_context_ptr rejected(llama_init_stage_from_model(models[rank].get(), too_large));
+        if (rejected) { throw std::runtime_error("streamed stage accepted a microbatch exceeding worst-case bank capacity"); }
+        auto competing = defaults; competing.moe_cache_size = 1;
+        llama_context_ptr cache_conflict(llama_init_stage_from_model(models[rank].get(), competing));
+        auto stale_host_copy = defaults; stale_host_copy.op_offload = true;
+        llama_context_ptr stale_copy(llama_init_stage_from_model(models[rank].get(), stale_host_copy));
+        if (cache_conflict || stale_copy) { throw std::runtime_error("streamed stage admitted conflicting expert storage/copy policies"); }
+    }
+    for (const auto & bad : std::vector<llama_stage_storage_params>{{2,8,1u<<20,4u<<20,32,2}, {1,7,1u<<20,4u<<20,32,2},
+            {1,8,0,4u<<20,32,2}, {1,8,1u<<20,0,32,2}, {1,8,1u<<20,4u<<20,0,2}}) {
+        llama_model_ptr rejected(llama_model_load_stage_streamed_from_file(path.string().c_str(), params, {1,0,{2,4,6}}, bad));
+        if (rejected) { throw std::runtime_error("streamed model accepted invalid storage policy"); }
+    }
+    llama_model_ptr laptop(llama_model_load_stage_streamed_from_file(path.string().c_str(), params, {1,1,{2,4,6}}, storage));
+    if (laptop) { throw std::runtime_error("streamed model admitted laptop disk fallback"); }
+    {
+        auto tiny = storage; tiny.context_bank_bytes = 1;
+        llama_model_ptr limited(llama_model_load_stage_streamed_from_file(path.string().c_str(), params, {1,0,{2,4,6}}, tiny));
+        if (!limited) { throw std::runtime_error("small context bank cap was applied during model-only loading"); }
+        auto context_params = llama_stage_context_default_params_for_model(limited.get()); context_params.n_ctx = 256;
+        llama_context_ptr context(llama_init_stage_from_model(limited.get(), context_params));
+        if (context) { throw std::runtime_error("context allocated banks beyond its aggregate cap"); }
+    }
+    test_streamed_callback_failure(models[0].get());
+    test_owned_stage_forward(reference, models, seed, 1);
+    for (const uint32_t rank : {0u, 2u}) {
+        llama_stage_storage_report report{}; report.version = 1;
+        if (!llama_model_stage_storage_report(models[rank].get(), &report) || report.native_read_requests == 0 ||
+                report.native_read_bytes == 0 || report.host_reserved_bytes > storage.host_cache_bytes) {
+            throw std::runtime_error("real streamed stage inference performed no bounded native expert reads");
+        }
+    }
+    LOG("Stage streamed: A/C deferred routed tensors, real bounded native reads, buffered B and full monolithic parity passed; physical residency NOT_VALIDATED\n");
+}
+#endif
+
 static void test_owned_stage_loading(const size_t seed, const float stdev) {
     auto metadata = glm_stage_fixture_metadata();
     tensor_data_params data{seed, stdev};
@@ -1032,6 +1147,10 @@ static void test_owned_stage_loading(const size_t seed, const float stdev) {
     params.lazy_mode = LLAMA_LAZY_MODE_ON;
     llama_model_ptr lazy(llama_model_load_stage_from_file(path.string().c_str(), params, {1,1,{2,4,6}}));
     if (lazy) { throw std::runtime_error("stage loader accepted inference-time lazy model reads"); }
+    params.lazy_mode = LLAMA_LAZY_MODE_OFF;
+#ifdef LLAMA_GLM_STAGE_STORAGE
+    test_streamed_stage_models(path, reference.get(), params, seed);
+#endif
     if (!std::filesystem::remove(path)) { throw std::runtime_error("stage fixture file remained open after loading"); }
     LOG("Stage-owned loading: three ranks, provider/file bytes, invalid plans and monolithic refusal passed\n");
     test_owned_stage_forward(reference.get(), stage_models, seed);
@@ -1508,6 +1627,9 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
             if (arch == LLM_ARCH_GLM5_NEXT && (!target_backend || std::strcmp(target_backend, "CPU") == 0)) {
                 test_owned_stage_loading(seed, stdev);
                 n_tests += 3;
+#ifdef LLAMA_GLM_STAGE_STORAGE
+                ++n_tests;
+#endif
             }
             std::pair<llama_model_ptr, llama_context_ptr> model_and_ctx_cpu;
             std::vector<float> logits_cpu;

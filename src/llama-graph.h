@@ -23,6 +23,7 @@ struct llama_prec_policy;
 struct llama_hadamard;
 
 class llama_moe_cache;
+struct llama_stage_context_experts;
 
 struct llama_memory_context_i;
 
@@ -805,6 +806,7 @@ struct llm_graph_params {
     const llama_memory_context_i * mctx;
     const llama_cross            * cross;
     const llama_moe_cache        * moe_cache;
+    llama_stage_context_experts  * stage_experts = nullptr;
 
     const llama_prec_policy * prec_policy = nullptr;
 
@@ -1058,6 +1060,7 @@ struct llm_graph_context {
     const llama_memory_context_i * mctx;
     const llama_cross            * cross;
     const llama_moe_cache        * moe_cache;
+    llama_stage_context_experts  * stage_experts;
 
     const llama_prec_policy * prec_policy;
 

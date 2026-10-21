@@ -80,6 +80,11 @@ expert_bank::expert_bank(ggml_backend_t backend, uint32_t slots, const std::vect
     state(std::make_shared<impl>(backend, slots, specs, budget, std::move(source))) {}
 
 uint64_t expert_bank::buffer_bytes() const { return ggml_backend_buffer_get_size(state->buffer.get()); }
+bool expert_bank::supports_type(ggml_type type) { return bank_type(type); }
+ggml_tensor * expert_bank::projection_for_graph(size_t index) const {
+    if (index >= state->banks.size()) { throw std::invalid_argument("invalid expert bank projection"); }
+    return state->banks[index];
+}
 
 expert_bank::lease::lease(std::shared_ptr<impl> state, std::vector<int32_t> ids) noexcept :
     state(std::move(state)), ids(std::move(ids)) {}

@@ -427,6 +427,7 @@ static void llama_adapter_lora_init_impl(llama_model & model, FILE * file, llama
 }
 
 llama_adapter_lora * llama_adapter_lora_init(llama_model * model, const char * path_lora) {
+    if (model && model->stage_streamed) { LLAMA_LOG_ERROR("%s: LoRA is not supported by streamed stages\n", __func__); return nullptr; }
     LLAMA_LOG_INFO("%s: loading lora adapter from '%s' ...\n", __func__, path_lora);
 
     FILE * file = ggml_fopen(path_lora, "rb");
@@ -442,6 +443,7 @@ llama_adapter_lora * llama_adapter_lora_init(llama_model * model, const char * p
 }
 
 llama_adapter_lora * llama_adapter_lora_init_from_file_ptr(llama_model * model, FILE * file) {
+    if (model && model->stage_streamed) { LLAMA_LOG_ERROR("%s: LoRA is not supported by streamed stages\n", __func__); return nullptr; }
     if (!file) {
         LLAMA_LOG_ERROR("%s: file is NULL\n", __func__);
         return nullptr;

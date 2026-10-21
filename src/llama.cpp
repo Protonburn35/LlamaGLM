@@ -10,6 +10,7 @@
 #include "llama-model-loader.h"
 #include "llama-model-saver.h"
 #include "llama-model.h"
+#include "llama-stage-provider.h"
 
 #include "ggml.h"
 #include "ggml-cpp.h"
@@ -315,7 +316,7 @@ static bool llama_prepare_model_devices(const llama_model_params & params, llama
 // Returns 0 on success, -1 on error, and -2 on cancellation via llama_progress_callback
 static std::pair<int, llama_model *> llama_model_load(struct gguf_context * metadata, llama_model_set_tensor_data_t set_tensor_data, void * set_tensor_data_ud,
         const std::string & fname, std::vector<std::string> & splits, FILE * file, llama_model_params & params,
-        const llama_stage_model_params * stage, bool strict_metadata = false) {
+        const llama_stage_model_params * stage, bool strict_metadata = false, const llama_stage_storage_params * storage = nullptr) {
     try {
         llama_model_loader ml(metadata, set_tensor_data, set_tensor_data_ud, fname, splits, file, params.load_mode,
             params.check_tensors, params.no_alloc, params.load_mtp, params.kv_overrides, params.tensor_buft_overrides, strict_metadata);
@@ -357,6 +358,7 @@ static std::pair<int, llama_model *> llama_model_load(struct gguf_context * meta
             model->stage = *stage;
             model->stage_enabled = true;
         }
+        if (storage) { model->stage_streamed = true; model->stage_storage = *storage; }
         if (model->arch == LLM_ARCH_CLIP) {
             throw std::runtime_error("CLIP cannot be used as main model, use it with --mmproj instead");
         }
@@ -534,7 +536,8 @@ static struct llama_model * llama_model_load_from_file_impl(
         std::vector<std::string> & splits,
         FILE * file,
         struct llama_model_params params,
-        const llama_stage_model_params * stage = nullptr) {
+        const llama_stage_model_params * stage = nullptr,
+        const llama_stage_storage_params * storage = nullptr) {
     {
         int n_sources_defined = 0;
         if (metadata != nullptr) {
@@ -556,6 +559,15 @@ static struct llama_model * llama_model_load_from_file_impl(
             params.load_mtp || params.vocab_only || params.lazy_mode != LLAMA_LAZY_MODE_OFF ||
             (!metadata && params.load_mode != LLAMA_LOAD_MODE_NONE))) {
         LLAMA_LOG_ERROR("%s: unsupported stage version/rank/ranges or load mode; use three nonempty target stages, buffered NONE, no lazy reads or MTP\n", __func__);
+        return nullptr;
+    }
+    if (storage && (!stage || stage->rank == 1 || metadata || file || params.no_alloc || params.check_tensors || params.no_host ||
+            storage->version != 1 || storage->bank_slots < 8 || storage->bank_slots > 512 ||
+            storage->host_cache_bytes == 0 || storage->host_cache_bytes > (1ull << 40) ||
+            storage->context_bank_bytes == 0 || storage->context_bank_bytes > (1ull << 36) ||
+            storage->host_cache_entries == 0 || storage->host_cache_entries > 4096 ||
+            storage->max_active_reads == 0 || storage->max_active_reads > 8)) {
+        LLAMA_LOG_ERROR("%s: invalid desktop storage version/rank/budgets or unsupported file/check/allocation policy\n", __func__);
         return nullptr;
     }
     // TODO: remove
@@ -583,7 +595,7 @@ static struct llama_model * llama_model_load_from_file_impl(
         };
     }
 
-    const auto [status, model] = llama_model_load(metadata, set_tensor_data, set_tensor_data_ud, path_model, splits, file, params, stage);
+    const auto [status, model] = llama_model_load(metadata, set_tensor_data, set_tensor_data_ud, path_model, splits, file, params, stage, false, storage);
     GGML_ASSERT(status <= 0);
     if (status < 0) {
         if (status == -1) {
@@ -635,6 +647,32 @@ struct llama_model * llama_model_load_stage_from_file(
     }
     std::vector<std::string> splits;
     return llama_model_load_from_file_impl(nullptr, nullptr, nullptr, path_model, splits, nullptr, params, &stage);
+}
+
+struct llama_model * llama_model_load_stage_streamed_from_file(
+        const char * path_model, llama_model_params params, llama_stage_model_params stage, llama_stage_storage_params storage) {
+    if (!path_model) { LLAMA_LOG_ERROR("%s: model path cannot be null\n", __func__); return nullptr; }
+    std::vector<std::string> splits;
+    return llama_model_load_from_file_impl(nullptr, nullptr, nullptr, path_model, splits, nullptr, params, &stage, &storage);
+}
+
+bool llama_model_stage_storage_report(const llama_model * model, llama_stage_storage_report * report) {
+    if (!report || report->version != 1) { return false; }
+    *report = {};
+    report->version = 1;
+    if (!model || !model->stage_streamed || !model->stage_source) { return false; }
+    try {
+        model->stage_source->report(*report);
+        for (const auto & entry : model->memory_breakdown()) {
+            if (entry.second > UINT64_MAX - report->model_buffer_bytes) { throw std::overflow_error("model buffer report overflow"); }
+            report->model_buffer_bytes += entry.second;
+        }
+        return true;
+    } catch (...) {
+        *report = {};
+        report->version = 1;
+        return false;
+    }
 }
 
 struct llama_model * llama_model_init_stage_from_user(

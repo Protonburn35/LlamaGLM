@@ -18,6 +18,7 @@
 struct llama_cparams;
 struct llama_ubatch;
 struct llama_model_loader;
+struct llama_stage_weight_source;
 struct llama_model;
 
 // available models
@@ -717,6 +718,9 @@ struct llama_model {
 
     bool stage_enabled = false;
     llama_stage_model_params stage = {};
+    bool stage_streamed = false;
+    llama_stage_storage_params stage_storage = {};
+    std::shared_ptr<llama_stage_weight_source> stage_source;
     bool stage_owns_tensor(const std::string & name) const;
     bool stage_owns_layer(uint32_t layer) const;
     uint32_t n_embd_inp() const;

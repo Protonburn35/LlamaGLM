@@ -2,6 +2,7 @@
 
 #include "llama-impl.h"
 #include "llama-model.h"
+#include "llama-stage-provider.h"
 #include "llama-moe-cache.h"
 #include "llama-batch.h"
 #include "llama-cparams.h"
@@ -1572,6 +1573,7 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
     mctx             (params.mctx),
     cross            (params.cross),
     moe_cache        (params.moe_cache),
+    stage_experts    (params.stage_experts),
     prec_policy      (params.prec_policy),
     hdmd             (params.hdmd),
     samplers         (params.samplers),
@@ -1675,9 +1677,13 @@ ggml_tensor * llm_graph_context::build_lora_mm_id(
           ggml_tensor * slots) const {
     cur = build_hadamard_input(w, cur);
     // the experts in the MoE cache are selected by their slots
-    ggml_tensor * res = slots == nullptr ?
-        ggml_mul_mat_id(ctx0, w, cur, ids) :
-        ggml_mul_mat_id(ctx0, moe_cache->get_experts(w), cur, slots);
+    ggml_tensor * actual_weight = w;
+    if (slots) {
+        if (stage_experts && stage_experts->owns(w)) { actual_weight = stage_experts->projection(w); }
+        else if (moe_cache) { actual_weight = moe_cache->get_experts(w); }
+        else { throw std::runtime_error("expert slot IDs have no matching weight bank"); }
+    }
+    ggml_tensor * res = ggml_mul_mat_id(ctx0, actual_weight, cur, slots ? slots : ids);
 
     if (prec_policy) {
         prec_policy->apply(res);
@@ -2537,6 +2543,15 @@ ggml_tensor * llm_graph_context::build_moe_cache_slots(
          ggml_tensor * down_exps,
          ggml_tensor * gate_up_exps,
                  int   il) const {
+    if (stage_experts && stage_experts->owns(up_exps)) {
+        for (const auto weight : {up_exps, gate_exps, down_exps, gate_up_exps}) {
+            if (weight && !stage_experts->owns(weight)) { throw std::runtime_error("streamed MoE group mixes incompatible expert sources"); }
+        }
+        auto * slots = stage_experts->build_slots(ctx0, selected_experts, il);
+        cb(slots, "ffn_moe_stage_slots", il);
+        ggml_build_forward_expand(gf, slots);
+        return slots;
+    }
     if (moe_cache == nullptr) {
         return nullptr;
     }

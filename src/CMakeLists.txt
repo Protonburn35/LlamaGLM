@@ -43,6 +43,7 @@ set(LLAMA_CORE_SOURCES
     llama-model.cpp
     llama-quant.cpp
     llama-sampler.cpp
+    llama-stage-provider.cpp
     llama-vocab.cpp
     unicode-data.cpp
     unicode.cpp
@@ -74,6 +75,10 @@ target_include_directories(llama PUBLIC ../include)
 target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
 
 target_link_libraries(llama PUBLIC ggml)
+if (LLAMA_GLM_RPC)
+    target_compile_definitions(llama PRIVATE LLAMA_GLM_STAGE_STORAGE)
+    target_link_libraries(llama PRIVATE llama-glm-expert-bank)
+endif()
 
 if (BUILD_SHARED_LIBS)
     set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)

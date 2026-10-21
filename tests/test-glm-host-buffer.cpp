@@ -272,8 +272,15 @@ static void backend_workspace(ggml_backend_t reference_backend) {
     require(bool(data), "cannot allocate workspace fixture tensors");
     operation.set(values);
     for (int repeat = 0; repeat < 2; ++repeat) {
-        require(ggml_backend_graph_compute(backend.get(), operation.computation) == GGML_STATUS_SUCCESS,
-                "locked CPU workspace computation failed");
+        const auto status = ggml_backend_graph_compute(backend.get(), operation.computation);
+        if (status != GGML_STATUS_SUCCESS) {
+            const auto stats = pool.stats();
+            throw std::runtime_error("locked CPU workspace computation failed: status=" + std::to_string(status) +
+                " planned=" + std::to_string(plan_size) + " budget=" + std::to_string(data_pages + 2 * work_pages) +
+                " reserved=" + std::to_string(stats.reserved_page_bytes) + " peak=" + std::to_string(stats.peak_reserved_page_bytes) +
+                " refusals=" + std::to_string(stats.refusals) + " failures=" + std::to_string(stats.failures) +
+                " native_error=" + std::to_string(stats.last_native_error));
+        }
         const auto actual = operation.get();
         require(std::memcmp(expected.data(), actual.data(), actual.size() * sizeof(float)) == 0,
                 "locked CPU workspace changed quantized outputs");

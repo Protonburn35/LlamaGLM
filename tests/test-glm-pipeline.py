@@ -17,13 +17,15 @@ import threading
 
 
 class Worker:
-    def __init__(self, executable: pathlib.Path, data: pathlib.Path, key_file: pathlib.Path, output: pathlib.Path, rank: int, next_port: int = 0):
+    def __init__(self, executable: pathlib.Path, data: pathlib.Path, key_file: pathlib.Path, output: pathlib.Path,
+                 rank: int, next_port: int = 0, *, streamed: bool = False):
         self.rank = rank
         self.output = output
         self.log_path = output.with_suffix(".log")
         self.log = self.log_path.open("wb")
         command = [str(executable), "--rank", str(rank), "--model", str(data / "model.gguf"),
-                   "--requests", str(data / "requests.json"), "--key-file", str(key_file), "--output", str(output)]
+                   "--requests", str(data / "requests.json"), "--key-file", str(key_file), "--output", str(output),
+                   "--storage", "streamed" if streamed else "buffered"]
         if next_port:
             command += ["--next-port", str(next_port)]
         try:
@@ -92,25 +94,63 @@ def compare(expected: pathlib.Path, actual: pathlib.Path, width: int, exact: boo
     return maximum
 
 
-def run(oracle: pathlib.Path, executable: pathlib.Path) -> None:
+def check_storage(worker: Worker, streamed: bool, logical_bytes: int) -> None:
+    records = [json.loads(line.removeprefix("GLM_PIPELINE_STORAGE ")) for line in worker.lines
+               if line.startswith("GLM_PIPELINE_STORAGE ")]
+    if len(records) != 2 or [record["phase"] for record in records] != ["startup", "complete"]:
+        raise RuntimeError("worker storage evidence is missing or out of order")
+    desktop = streamed and worker.rank != 1
+    for record in records:
+        if (record["version"], record["rank"], record["microbatch"], record["mode"]) != (
+                1, worker.rank, 1 if streamed else 32, "desktop-streamed" if desktop else "buffered"):
+            raise RuntimeError("worker executed the wrong storage/microbatch profile")
+        if desktop:
+            if not (0 < record["routed_logical_bytes"] < logical_bytes and
+                    0 < record["model_buffer_bytes"] < logical_bytes and
+                    record["streamed_tensors"] == (3 if worker.rank == 0 else 6) and
+                    0 <= record["host_reserved_bytes"] <= 16 << 20):
+                raise RuntimeError("streamed worker did not defer experts or exceeded its host payload cap")
+            if record["phase"] == "startup":
+                if any(record[key] != 0 for key in ("native_read_requests", "native_read_bytes", "host_reserved_bytes")):
+                    raise RuntimeError("streamed worker read expert payloads during startup")
+            elif record["native_read_requests"] <= 0 or record["native_read_bytes"] <= 0:
+                raise RuntimeError("streamed model worker performed no source reads")
+        elif any(key.startswith("native_read") for key in record):
+            raise RuntimeError("buffered worker unexpectedly exposed a desktop disk source")
+    if desktop and any(records[0][key] != records[1][key] for key in
+                       ("routed_logical_bytes", "model_buffer_bytes", "streamed_tensors")):
+        raise RuntimeError("streamed worker changed weight ownership during inference")
+    if desktop:
+        final = records[1]
+        print(f"STREAMED_SOURCE_RANK {worker.rank}: routed logical {final['routed_logical_bytes']}; "
+              f"ordinary buffers {final['model_buffer_bytes']}; host reserved {final['host_reserved_bytes']}; "
+              f"native reads {final['native_read_requests']}; native requested bytes {final['native_read_bytes']}")
+
+
+def run(oracle: pathlib.Path, executable: pathlib.Path, *, streamed: bool = False) -> None:
     with tempfile.TemporaryDirectory(prefix="glm three process fixture ") as directory:
         root = pathlib.Path(directory)
         data = root / "oracle and model"
-        generation = subprocess.run([str(oracle), "--glm-pipeline-fixture", str(data), "--seed", "53"],
+        command = [str(oracle), "--glm-pipeline-fixture", str(data), "--seed", "53"]
+        if streamed:
+            command += ["--glm-pipeline-streamed"]
+        generation = subprocess.run(command,
                                     capture_output=True, text=True, timeout=60)
         if generation.returncode != 0 or "GLM pipeline oracle:" not in generation.stdout:
             raise RuntimeError(f"oracle generation failed: {generation.stdout[-2000:]} {generation.stderr[-4000:]}")
         requests = json.loads((data / "requests.json").read_text())
+        if requests["microbatch"] != (1 if streamed else 32):
+            raise RuntimeError("independent monolithic oracle used the wrong microbatch")
         key_file = root / "ephemeral-fixture-key.bin"
         key_file.touch(mode=0o600, exist_ok=False)
         key_file.write_bytes(secrets.token_bytes(32))
         workers: list[Worker] = []
         try:
-            c = Worker(executable, data, key_file, root / "stage-C.f32le", 2)
+            c = Worker(executable, data, key_file, root / "stage-C.f32le", 2, streamed=streamed)
             workers.append(c)
-            b = Worker(executable, data, key_file, root / "stage-B.f32le", 1, c.listen_port())
+            b = Worker(executable, data, key_file, root / "stage-B.f32le", 1, c.listen_port(), streamed=streamed)
             workers.append(b)
-            a = Worker(executable, data, key_file, root / "stage-A.f32le", 0, b.listen_port())
+            a = Worker(executable, data, key_file, root / "stage-A.f32le", 0, b.listen_port(), streamed=streamed)
             workers.append(a)
             if len({w.process.pid for w in workers}) != 3:
                 raise RuntimeError("pipeline did not create three distinct worker processes")
@@ -129,12 +169,16 @@ def run(oracle: pathlib.Path, executable: pathlib.Path) -> None:
                 if not 0 < count < requests["model_payload_bytes"]:
                     raise RuntimeError(f"rank {worker.rank} weight bytes {count}, reference {requests['model_payload_bytes']}")
                 payload_bytes += count
+                check_storage(worker, streamed, count)
                 error = compare(data / f"oracle-{worker.rank}.f32le", worker.output,
                                 128 if worker.rank == 2 else 512, worker.rank != 2)
                 maximum = max(maximum, error)
             if payload_bytes != requests["model_payload_bytes"]:
                 raise RuntimeError("stage weights do not cover the full target model exactly once")
-            print(f"THREE_PROCESS_CPU_FIXTURE_PASS: A/B/C own 2/2/2 layers; 131 tokens; boundaries byte-exact; max logit error {maximum:.9g}")
+            profile = "THREE_PROCESS_STREAMED_CPU_FIXTURE_PASS" if streamed else "THREE_PROCESS_CPU_FIXTURE_PASS"
+            print(f"{profile}: A/B/C own 2/2/2 layers; 131 tokens; boundaries byte-exact; max logit error {maximum:.9g}")
+            if streamed:
+                print("STREAMED_SOURCE_EVIDENCE_PASS: A/C zero startup reads, deferred expert bytes, bounded actual inference I/O; B buffered; physical residency NOT_VALIDATED")
         finally:
             for worker in reversed(workers):
                 worker.close()
@@ -142,9 +186,9 @@ def run(oracle: pathlib.Path, executable: pathlib.Path) -> None:
         # With B absent, A must not authenticate directly to C or produce any inference output.
         rejected: list[Worker] = []
         try:
-            c = Worker(executable, data, key_file, root / "missing-B-C.f32le", 2)
+            c = Worker(executable, data, key_file, root / "missing-B-C.f32le", 2, streamed=streamed)
             rejected.append(c)
-            a = Worker(executable, data, key_file, root / "missing-B-A.f32le", 0, c.listen_port())
+            a = Worker(executable, data, key_file, root / "missing-B-A.f32le", 0, c.listen_port(), streamed=streamed)
             rejected.append(a)
             for worker in rejected:
                 worker.finish(False)
@@ -171,11 +215,11 @@ def run(oracle: pathlib.Path, executable: pathlib.Path) -> None:
             model_file.write(b"tOk_0")
         mismatched: list[Worker] = []
         try:
-            c = Worker(executable, data, key_file, root / "identity-C.f32le", 2)
+            c = Worker(executable, data, key_file, root / "identity-C.f32le", 2, streamed=streamed)
             mismatched.append(c)
-            b = Worker(executable, data, key_file, root / "identity-B.f32le", 1, c.listen_port())
+            b = Worker(executable, data, key_file, root / "identity-B.f32le", 1, c.listen_port(), streamed=streamed)
             mismatched.append(b)
-            a = Worker(executable, changed, key_file, root / "identity-A.f32le", 0, b.listen_port())
+            a = Worker(executable, changed, key_file, root / "identity-A.f32le", 0, b.listen_port(), streamed=streamed)
             mismatched.append(a)
             for worker in reversed(mismatched):
                 worker.finish(False)
@@ -195,3 +239,4 @@ if __name__ == "__main__":
     parser.add_argument("--worker", required=True, type=pathlib.Path)
     args = parser.parse_args()
     run(args.oracle.resolve(strict=True), args.worker.resolve(strict=True))
+    run(args.oracle.resolve(strict=True), args.worker.resolve(strict=True), streamed=True)

@@ -145,6 +145,7 @@ static void usage(char ** argv) {
     LOG("  -v <N>                   Set log verbosity level\n");
     LOG("  -b, --backend <backend>  Run only on the given backend device\n");
     LOG("      --glm-pipeline-fixture <dir>  Write a small GLM model and separate monolithic CPU oracle\n");
+    LOG("      --glm-pipeline-streamed       Use microbatch 1 for that independent oracle\n");
     LOG("  -h, --help               Show this help message\n\n");
     LOG("Examples:\n");
     LOG("  %s\n", argv[0]);
@@ -828,7 +829,7 @@ static gguf_context_ptr glm_stage_fixture_metadata() {
     return metadata;
 }
 
-static int write_glm_pipeline_fixture(const std::string & directory, size_t seed, float stdev, int verbosity) {
+static int write_glm_pipeline_fixture(const std::string & directory, size_t seed, float stdev, int verbosity, bool streamed) {
     common_log_set_verbosity_thold(verbosity);
     const uint32_t byte_order = 1;
     if (*reinterpret_cast<const uint8_t *>(&byte_order) != 1) { throw std::runtime_error("fixture files require a little-endian host"); }
@@ -853,7 +854,7 @@ static int write_glm_pipeline_fixture(const std::string & directory, size_t seed
     boundaries.rows.emplace("l_out-3", std::vector<float>{});
     auto params = llama_stage_context_default_params();
     params.n_batch = 64;
-    params.n_ubatch = 32;
+    params.n_ubatch = streamed ? 1 : 32;
     params.n_threads = params.n_threads_batch = 2;
     params.offload_kqv = false;
     params.op_offload = false;
@@ -868,6 +869,7 @@ static int write_glm_pipeline_fixture(const std::string & directory, size_t seed
     if (!payload_bytes || payload_bytes > (128ull << 20)) { throw std::runtime_error("invalid oracle payload byte inventory"); }
     std::ofstream requests(path / "requests.json");
     requests << "{\"version\":1,\"context\":256,\"hidden\":128,\"vocab\":128,\"model_payload_bytes\":" << payload_bytes
+             << ",\"microbatch\":" << params.n_ubatch
              << ",\"chunks\":[1,3,4,17,31,64,11],\"tokens\":[";
     for (size_t i = 0; i < tokens.size(); ++i) { requests << (i ? "," : "") << tokens[i]; }
     requests << "]}\n";
@@ -1782,6 +1784,7 @@ int main(int argc, char ** argv) {
     float stdev = 0.1f;
     std::string out;
     std::string pipeline_fixture;
+    bool pipeline_streamed = false;
     const char * target_backend = nullptr;
 
     int verbosity = LOG_LEVEL_ERROR;
@@ -1840,6 +1843,8 @@ int main(int argc, char ** argv) {
         } else if (strcmp(argv[i], "--glm-pipeline-fixture") == 0) {
             if (i + 1 == argc || argv[i + 1][0] == '\0') { usage(argv); return 1; }
             pipeline_fixture = argv[++i];
+        } else if (strcmp(argv[i], "--glm-pipeline-streamed") == 0) {
+            pipeline_streamed = true;
         } else if (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--backend") == 0) {
             if (i + 1 < argc) {
                 const char * backend_name = argv[++i];
@@ -1868,8 +1873,9 @@ int main(int argc, char ** argv) {
     try {
         if (!pipeline_fixture.empty()) {
             if (!out.empty() || !arch_filter.empty() || target_backend) { throw std::invalid_argument("pipeline fixture generation is a separate CPU mode"); }
-            return write_glm_pipeline_fixture(pipeline_fixture, seed, stdev, verbosity);
+            return write_glm_pipeline_fixture(pipeline_fixture, seed, stdev, verbosity, pipeline_streamed);
         }
+        if (pipeline_streamed) { throw std::invalid_argument("streamed oracle mode requires --glm-pipeline-fixture"); }
         if (!out.empty()) {
             return save_models(arch_filter, seed, stdev, verbosity, out);
         }

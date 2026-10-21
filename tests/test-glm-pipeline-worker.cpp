@@ -82,8 +82,12 @@ int main(int argc, char ** argv) {
         }
         for (const auto & arg : args) {
             require(arg.first == "--rank" || arg.first == "--model" || arg.first == "--requests" ||
-                    arg.first == "--output" || arg.first == "--next-port" || arg.first == "--key-file", "unknown pipeline worker argument");
+                    arg.first == "--output" || arg.first == "--next-port" || arg.first == "--key-file" ||
+                    arg.first == "--storage", "unknown pipeline worker argument");
         }
+        const auto storage_mode = args.count("--storage") ? args.at("--storage") : "buffered";
+        require(storage_mode == "buffered" || storage_mode == "streamed", "unknown fixture storage profile");
+        const bool streamed = storage_mode == "streamed";
         const uint32_t rank = integer(args.at("--rank"), 2);
         const std::string model_path = args.at("--model");
         const std::string request_path = args.at("--requests");
@@ -97,7 +101,8 @@ int main(int argc, char ** argv) {
         const auto requests = json::parse(requests_file);
         const std::vector<uint32_t> expected_chunks{1,3,4,17,31,64,11};
         require(requests.at("version") == 1 && requests.at("context") == 256 && requests.at("hidden") == 128 &&
-                requests.at("vocab") == 128 && requests.at("chunks") == expected_chunks, "invalid fixture request schema");
+                requests.at("vocab") == 128 && requests.at("chunks") == expected_chunks &&
+                requests.at("microbatch") == (streamed ? 1 : 32), "invalid fixture request schema/profile");
         const auto & token_values = requests.at("tokens");
         require(token_values.is_array() && token_values.size() == 131, "invalid fixture token count");
         std::vector<int32_t> tokens;
@@ -131,13 +136,41 @@ int main(int argc, char ** argv) {
         params.load_mode = LLAMA_LOAD_MODE_NONE;
         params.lazy_mode = LLAMA_LAZY_MODE_OFF;
         params.progress_callback = [](float, void *) { return true; };
-        llama_model_ptr model(llama_model_load_stage_from_file(model_path.c_str(), params, {1,rank,{2,4,6}}));
+        const bool desktop_source = streamed && rank != 1;
+        const llama_stage_storage_params storage{1,8,16u<<20,16u<<20,64,2};
+        llama_model_ptr model(desktop_source ?
+            llama_model_load_stage_streamed_from_file(model_path.c_str(), params, {1,rank,{2,4,6}}, storage) :
+            llama_model_load_stage_from_file(model_path.c_str(), params, {1,rank,{2,4,6}}));
         require(bool(model), "owned fixture model failed to load");
         require(llama_model_n_layer(model.get()) == 6 && llama_model_n_embd(model.get()) == 128 &&
                 llama_vocab_n_tokens(llama_model_get_vocab(model.get())) == 128, "fixture model dimensions changed");
-        auto context_params = llama_stage_context_default_params();
+        const auto report_storage = [&](const char * phase) {
+            llama_stage_storage_report report{}; report.version = 1;
+            const bool has_source = llama_model_stage_storage_report(model.get(), &report);
+            require(has_source == desktop_source, "fixture worker has the wrong storage provider");
+            json evidence{{"version",1}, {"rank",rank}, {"phase",phase}, {"microbatch",streamed ? 1 : 32},
+                {"mode",desktop_source ? "desktop-streamed" : "buffered"}};
+            if (desktop_source) {
+                require(report.streamed_tensors > 0 && report.routed_logical_bytes > 0 &&
+                        report.model_buffer_bytes < llama_model_size(model.get()) && report.host_reserved_bytes <= storage.host_cache_bytes,
+                        "streamed worker allocated full experts or exceeded its host cap");
+                const bool startup = std::strcmp(phase, "startup") == 0;
+                require(startup ? (report.native_read_requests == 0 && report.native_read_bytes == 0 && report.host_reserved_bytes == 0) :
+                        (report.native_read_requests > 0 && report.native_read_bytes > 0), "unexpected streamed worker source I/O");
+                evidence["streamed_tensors"] = report.streamed_tensors;
+                evidence["routed_logical_bytes"] = report.routed_logical_bytes;
+                evidence["model_buffer_bytes"] = report.model_buffer_bytes;
+                evidence["host_reserved_bytes"] = report.host_reserved_bytes;
+                evidence["native_read_requests"] = report.native_read_requests;
+                evidence["native_read_bytes"] = report.native_read_bytes;
+            }
+            std::printf("GLM_PIPELINE_STORAGE %s\n", evidence.dump().c_str());
+            std::fflush(stdout);
+        };
+        report_storage("startup");
+        auto context_params = llama_stage_context_default_params_for_model(model.get());
         context_params.n_batch = 64;
-        context_params.n_ubatch = 32;
+        context_params.n_ubatch = streamed ? 1 : 32;
         context_params.n_threads = context_params.n_threads_batch = 2;
         context_params.offload_kqv = false;
         context_params.op_offload = false;
@@ -201,6 +234,7 @@ int main(int argc, char ** argv) {
         }
         output.close();
         require(bool(output), "cannot seal fixture worker output");
+        report_storage("complete");
         std::printf("GLM_PIPELINE_DONE %u 131\n", rank);
         std::fflush(stdout);
         common_log_flush(common_log_main());

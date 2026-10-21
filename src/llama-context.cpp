@@ -174,6 +174,9 @@ llama_context::llama_context(
     // MTP uses the embd input for the hidden state
     balloc(std::make_unique<llama_batch_allocr>(model.hparams.n_pos_per_embd(),
                 llm_arch_supports_mixed_batch(model.arch) && params.ctx_type == LLAMA_CONTEXT_TYPE_DEFAULT)) {
+    if (model.stage_enabled && model.stage.rank < 2) {
+        graph_has_logits = false;
+    }
     // TODO warning when creating llama_context with awkward ctx size that is not a power of 2,
     //     may need to be backend-dependent
     LLAMA_LOG_INFO("%s: constructing llama_context\n", __func__);
@@ -1084,7 +1087,7 @@ float * llama_context::get_embeddings_ith(int32_t i) {
         }
 
         const int64_t j = output_resolve_row(i);
-        const uint32_t n_embd_out = model.hparams.n_embd_out();
+        const uint32_t n_embd_out = model.n_embd_out();
         return embd.data + j*n_embd_out;
     } catch (const std::exception & err) {
         LLAMA_LOG_ERROR("%s: invalid embeddings id %d, reason: %s\n", __func__, i, err.what());
@@ -1119,7 +1122,7 @@ float * llama_context::get_embeddings_nextn_ith(int32_t i) {
             throw std::runtime_error("no nextn embeddings");
         }
 
-        const uint32_t n_embd = model.hparams.n_embd_out();
+        const uint32_t n_embd = model.n_embd_out();
 
         if (!cparams.embeddings_nextn_masked) {
             // unmasked: nextn rows are stored densely, indexed by raw token position.
@@ -1580,6 +1583,10 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 }
 
 int llama_context::encode(const llama_batch_ext & batch_inp) {
+    if (model.stage_enabled) {
+        LLAMA_LOG_ERROR("%s: layer stages support causal decoding only\n", __func__);
+        return -1;
+    }
     if (batch_inp.tokens.empty()) {
         LLAMA_LOG_ERROR("%s: n_tokens == 0\n", __func__);
         return -1;
@@ -1682,7 +1689,7 @@ int llama_context::encode(const llama_batch_ext & batch_inp) {
                 {
                     // extract token embeddings
                     GGML_ASSERT(embd.data != nullptr);
-                    const uint32_t n_embd_out = hparams.n_embd_out();
+                    const uint32_t n_embd_out = model.n_embd_out();
 
                     GGML_ASSERT(n_tokens*n_embd_out <= (int64_t) embd.size);
                     ggml_backend_tensor_get_async(backend_embd, t_embd, embd.data, 0, n_tokens*n_embd_out*sizeof(float));
@@ -1700,7 +1707,7 @@ int llama_context::encode(const llama_batch_ext & batch_inp) {
 
                         // use n_embd_out (not n_embd_inp) - the pooled embedding has the model's
                         // output dimension, which differs from input dimension for deepstack models (e.g. qwen3vl)
-                        const uint32_t n_embd_out = hparams.n_embd_out();
+                        const uint32_t n_embd_out = model.n_embd_out();
                         embd_seq_out[seq_id].resize(n_embd_out);
                         ggml_backend_tensor_get_async(backend_embd, t_embd, embd_seq_out[seq_id].data(), (n_embd_out*seq_idx)*sizeof(float), n_embd_out*sizeof(float));
                     }
@@ -1732,7 +1739,7 @@ int llama_context::encode(const llama_batch_ext & batch_inp) {
         ggml_backend_t backend_h = ggml_backend_sched_get_tensor_backend(sched.get(), t_h_nextn);
         GGML_ASSERT(backend_h != nullptr);
 
-        const uint32_t n_embd = hparams.n_embd_out();
+        const uint32_t n_embd = model.n_embd_out();
         GGML_ASSERT(n_tokens*n_embd <= (int64_t) embd_nextn.size);
         ggml_backend_tensor_get_async(backend_h, t_h_nextn, embd_nextn.data, 0, n_tokens*n_embd*sizeof(float));
     }
@@ -1829,6 +1836,27 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
         return -1;
     }
 
+    if (model.stage_enabled) {
+        if (stage_failed || batch_inp.tokens.size() > cparams.n_batch) {
+            LLAMA_LOG_ERROR("%s: failed stage context or batch exceeds stage capacity; recreate failed contexts\n", __func__);
+            return -1;
+        }
+        if (!cparams.causal_attn || !sampling.samplers.empty() || (model.stage.rank < 2 && !cparams.embeddings)) {
+            LLAMA_LOG_ERROR("%s: stage context settings no longer preserve causal, complete boundary outputs\n", __func__);
+            return -1;
+        }
+        int64_t next_pos = int64_t(memory->seq_pos_max(0)) + 1;
+        for (const auto & token : batch_inp.tokens) {
+            if (token.seq_ids.size() != 1 || !token.seq_ids.count(0) || token.pos[0] != next_pos ||
+                    next_pos >= cparams.n_ctx_seq || token.has_state ||
+                    (model.stage.rank > 0 && (!token.has_embd || token.id != LLAMA_TOKEN_NULL))) {
+                LLAMA_LOG_ERROR("%s: stage input requires consecutive positions within context on seq 0 and FP32 boundaries on B/C\n", __func__);
+                return -1;
+            }
+            ++next_pos;
+        }
+    }
+
     if (batch_inp.n_embd > 0 && batch_inp.n_embd != batch_inp.n_embd_inp) {
         LLAMA_LOG_ERROR("%s: embd row width %zu does not match the decoder input %zu\n",
                 __func__, batch_inp.n_embd, batch_inp.n_embd_inp);
@@ -1913,6 +1941,11 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
     embd_batch_idxs.clear();
 
     sched_reserve();
+
+    struct stage_failure_guard {
+        bool * failed;
+        ~stage_failure_guard() { if (failed) { *failed = true; } }
+    } stage_guard{model.stage_enabled ? &stage_failed : nullptr};
 
     bool did_optimize = false;
 
@@ -2070,7 +2103,7 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
                     {
                         // extract token embeddings
                         GGML_ASSERT(embd.data != nullptr);
-                        const uint32_t n_embd_out = hparams.n_embd_out();
+                        const uint32_t n_embd_out = model.n_embd_out();
                         float * embd_out = embd.data + n_outputs_prev*n_embd_out;
 
                         if (n_outputs) {
@@ -2088,7 +2121,7 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
 
                         // use n_embd_out (not n_embd_inp) - the pooled embedding has the model's
                         // output dimension, which differs from input dimension for deepstack models (e.g. qwen3vl)
-                        const uint32_t n_embd_out = hparams.n_embd_out();
+                        const uint32_t n_embd_out = model.n_embd_out();
 
                         for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
                             const llama_seq_id seq_id  = ubatch.seq_id_unq[s];
@@ -2134,7 +2167,7 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
                 ggml_backend_t backend_h = ggml_backend_sched_get_tensor_backend(sched.get(), t_h_nextn);
                 GGML_ASSERT(backend_h != nullptr);
 
-                const uint32_t n_embd  = hparams.n_embd_out();
+                const uint32_t n_embd  = model.n_embd_out();
                 float * embd_nextn_out = embd_nextn.data + offset*n_embd;
 
                 GGML_ASSERT((offset + n_rows)*n_embd <= (int64_t) embd_nextn.size);
@@ -2217,6 +2250,7 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
     // wait for the computation to finish (automatically done when obtaining the model output)
     //synchronize();
 
+    stage_guard.failed = nullptr;
     return 0;
 }
 
@@ -2233,7 +2267,7 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     const auto n_batch    = cparams.n_batch;
     const auto n_vocab    = vocab.n_tokens();
     const auto n_embd     = hparams.n_embd;
-    const auto n_embd_out = hparams.n_embd_out();
+    const auto n_embd_out = model.n_embd_out();
 
     bool has_logits     = !cparams.embeddings || graph_has_logits;
     bool has_embd       = cparams.embeddings;
@@ -2422,7 +2456,7 @@ bool llama_context::extract_layer_inputs(const llm_graph_result * res, size_t to
 void llama_context::output_reorder() {
     const uint64_t n_vocab     = model.vocab.n_tokens();
     const uint64_t n_embd      = model.hparams.n_embd;
-    const uint64_t n_embd_out  = model.hparams.n_embd_out();
+    const uint64_t n_embd_out  = model.n_embd_out();
 
     for (size_t s = 0; s < output_swaps.size(); ++s) {
         const uint64_t i0 = output_swaps[s].i0;
@@ -4018,16 +4052,26 @@ llama_context_params llama_context_default_params() {
     return result;
 }
 
-llama_context * llama_init_from_model(
+llama_context_params llama_stage_context_default_params() {
+    auto params = llama_context_default_params();
+    params.n_ctx = 0;
+    params.n_outputs_max = 0;
+    params.n_outputs_max_per_seq = 0;
+    params.pooling_type = LLAMA_POOLING_TYPE_NONE;
+    params.attention_type = LLAMA_ATTENTION_TYPE_CAUSAL;
+    return params;
+}
+
+static llama_context * llama_init_from_model_impl(
                  llama_model * model,
-        llama_context_params   params) {
+        llama_context_params   params, bool allow_stage) {
     if (!model) {
         LLAMA_LOG_ERROR("%s: model cannot be NULL\n", __func__);
         return nullptr;
     }
 
-    if (model->stage_enabled) {
-        LLAMA_LOG_ERROR("%s: partial stage models require the stage evaluator, which is not implemented yet\n", __func__);
+    if (model->stage_enabled && !allow_stage) {
+        LLAMA_LOG_ERROR("%s: partial stage models require llama_init_stage_from_model\n", __func__);
         return nullptr;
     }
 
@@ -4128,6 +4172,39 @@ llama_context * llama_init_from_model(
     }
 
     return nullptr;
+}
+
+llama_context * llama_init_from_model(llama_model * model, llama_context_params params) {
+    return llama_init_from_model_impl(model, params, false);
+}
+
+llama_context * llama_init_stage_from_model(llama_model * model, llama_context_params params) {
+    if (!model || !model->stage_enabled || params.ctx_type != LLAMA_CONTEXT_TYPE_DEFAULT ||
+            params.n_seq_max != 1 || params.n_rs_seq != 0 || params.n_samplers != 0 || params.ctx_other ||
+            params.type_k != GGML_TYPE_F16 || params.type_v != GGML_TYPE_F16 ||
+            params.attention_type == LLAMA_ATTENTION_TYPE_NON_CAUSAL ||
+            (params.pooling_type != LLAMA_POOLING_TYPE_UNSPECIFIED && params.pooling_type != LLAMA_POOLING_TYPE_NONE) ||
+            (params.n_ctx != 0 && params.n_ctx > model->hparams.n_ctx_train) ||
+            (params.n_ctx == 0 ? model->hparams.n_ctx_train : params.n_ctx) > 1048576) {
+        LLAMA_LOG_ERROR("%s: unsupported stage context; use a loaded stage, one sequence, FP16 cache and non-speculative causal decoding\n", __func__);
+        return nullptr;
+    }
+    for (uint32_t layer = 0; layer < model->hparams.n_layer(); ++layer) {
+        if (!model->hparams.is_recr(layer) && !model->hparams.is_indexer_full(layer)) {
+            LLAMA_LOG_ERROR("%s: cross-layer index-selection sharing is not supported by the stage boundary\n", __func__);
+            return nullptr;
+        }
+    }
+    params.pooling_type = LLAMA_POOLING_TYPE_NONE;
+    params.attention_type = LLAMA_ATTENTION_TYPE_CAUSAL;
+    if (model->stage.rank < 2) {
+        if (params.n_outputs_max != 0 || params.n_outputs_max_per_seq != 0) {
+            LLAMA_LOG_ERROR("%s: headless stages require complete residual outputs; use stage context defaults\n", __func__);
+            return nullptr;
+        }
+        params.embeddings = true;
+    }
+    return llama_init_from_model_impl(model, params, true);
 }
 
 // deprecated

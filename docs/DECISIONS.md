@@ -10,3 +10,11 @@
 - Separate metadata planning from inference admission. The native planner explicitly reports NOT_VALIDATED for admission and does not claim missing runtime capabilities work.
 - Use normal Windows-2022 hosted Actions for native builds, pinned verified CUDA 12.8.1 components and pinned CCCL. No paid infrastructure or physical GPU is provisioned.
 - StrataRPC is a read-only design reference, not a source transplant. Its Qwen/two-stage state is not GLM's. DeepSeekRPC main resolved to `25de683e5ef3a9299267b8e61bafb1d755941c84`; no dependency or source import was taken.
+
+## 2026-10-21
+
+- Expose stage context creation through the experimental side header; keep ordinary model/context behavior and stable parameter structs unchanged.
+- Use one shared ownership predicate for weights and all three memory components. Preserve all mHC streams through A/B and make boundary widths explicit in batch/output APIs.
+- Start with single-sequence, causal, append-only evaluation. Reject unsupported pooling, MTP/rollback, backend samplers and cross-layer shared index selections. Default to full model context, capped at the target's 1,048,576 positions, without a hidden smaller fallback.
+- Permanently invalidate a stage context after preparation/compute failure; recovery recreates contexts against retained weights. Distributed coordination/reset/replay remains required before this can serve requests across processes.
+- Keep the monolithic evaluator as the oracle. Use independent intermediate captures and final logits, mixed KDA/DSA ownership and incomplete-pool/chunk boundaries to qualify local execution before transport integration.

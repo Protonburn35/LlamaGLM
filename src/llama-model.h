@@ -718,6 +718,9 @@ struct llama_model {
     bool stage_enabled = false;
     llama_stage_model_params stage = {};
     bool stage_owns_tensor(const std::string & name) const;
+    bool stage_owns_layer(uint32_t layer) const;
+    uint32_t n_embd_inp() const;
+    uint32_t n_embd_out() const;
 
     // per-tensor activation precision policy
     llama_prec_policy prec_policy;

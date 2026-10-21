@@ -12,7 +12,9 @@
 #include "../src/llama-arch.h"
 #include "../src/llama-model.h"
 #include "../src/llama-model-saver.h"
+#include "../src/llama-memory-hybrid-idx.h"
 
+#include <array>
 #include <cinttypes>
 #include <cmath>
 #include <cstddef>
@@ -635,9 +637,187 @@ static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
     return std::make_pair(std::move(model), std::move(lctx));
 }
 
+struct stage_boundaries {
+    std::map<std::string, std::vector<float>> rows;
+
+    static bool capture(ggml_tensor * tensor, bool ask, void * user_data) {
+        auto & rows = static_cast<stage_boundaries *>(user_data)->rows;
+        const auto it = rows.find(ggml_get_name(tensor));
+        if (ask) { return it != rows.end(); }
+        if (it == rows.end()) { return true; }
+        GGML_ASSERT(tensor->type == GGML_TYPE_F32 && ggml_is_contiguous(tensor));
+        const size_t old_size = it->second.size();
+        it->second.resize(old_size + ggml_nelements(tensor));
+        ggml_backend_tensor_get(tensor, it->second.data() + old_size, 0, ggml_nbytes(tensor));
+        return true;
+    }
+};
+
+static double stage_compare(const float * actual, const std::vector<float> & expected) {
+    if (!actual || expected.empty()) { throw std::runtime_error("missing stage oracle outputs"); }
+    double max_error = 0;
+    for (size_t i = 0; i < expected.size(); ++i) {
+        const double error = std::abs(double(actual[i]) - expected[i]);
+        if (!std::isfinite(actual[i]) || !std::isfinite(expected[i]) || error > 2e-5 * (1 + std::abs(expected[i]))) {
+            throw std::runtime_error("stage outputs differ from the monolithic oracle at element " + std::to_string(i));
+        }
+        max_error = std::max(max_error, error);
+    }
+    return max_error;
+}
+
+static void test_owned_stage_forward(llama_model * reference, const std::array<llama_model_ptr, 3> & models, size_t seed) {
+    auto params = llama_stage_context_default_params();
+    if (params.n_ctx != 0) { throw std::runtime_error("stage defaults silently shorten the context"); }
+    params.n_batch = 64;
+    params.n_ubatch = 32;
+    params.n_threads = params.n_threads_batch = 4;
+    stage_boundaries boundaries;
+    for (size_t rank = 0; rank < 2; ++rank) {
+        boundaries.rows.emplace("l_out-" + std::to_string(models[rank]->stage.layer_ends[rank] - 1), std::vector<float>{});
+    }
+    auto ref_params = params;
+    ref_params.cb_eval = stage_boundaries::capture;
+    ref_params.cb_eval_user_data = &boundaries;
+    llama_context_ptr oracle(llama_init_from_model(reference, ref_params));
+    if (!oracle) { throw std::runtime_error("cannot create stage reference context"); }
+    std::array<llama_context_ptr, 3> contexts;
+    const size_t width = size_t(reference->hparams.n_embd) * reference->hparams.dsv4_hc_mult;
+    for (size_t rank = 0; rank < 3; ++rank) {
+        contexts[rank].reset(llama_init_stage_from_model(models[rank].get(), params));
+        if (!contexts[rank]) { throw std::runtime_error("cannot create owned-layer context"); }
+        if (llama_model_n_embd_inp(models[rank].get()) != int32_t(rank == 0 ? reference->hparams.n_embd : width) ||
+                llama_model_n_embd_out(models[rank].get()) != int32_t(rank == 2 ? reference->hparams.n_embd : width)) {
+            throw std::runtime_error("incorrect four-stream stage API dimensions");
+        }
+        const auto * memory = dynamic_cast<llama_memory_hybrid_idx *>(llama_get_memory(contexts[rank].get()));
+        if (!memory) { throw std::runtime_error("stage did not allocate the GLM hybrid memory"); }
+        for (uint32_t layer = 0; layer < reference->hparams.n_layer(); ++layer) {
+            const bool owned = models[rank]->stage_owns_layer(layer);
+            const auto * recurrent = memory->get_mem_recr();
+            const bool kda = reference->hparams.is_recr(layer);
+            if (bool(recurrent->r_l.at(layer)) != (owned && kda) || bool(recurrent->s_l.at(layer)) != (owned && kda)) {
+                throw std::runtime_error("stage allocated missing or unowned KDA state");
+            }
+            if (owned && kda && (recurrent->r_l[layer]->type != GGML_TYPE_F32 || recurrent->s_l[layer]->type != GGML_TYPE_F32)) {
+                throw std::runtime_error("stage reduced KDA state precision");
+            }
+            for (const auto * cache : {memory->get_mem_attn(), memory->get_mem_idx()}) {
+                ggml_tensor * storage = nullptr;
+                try { storage = cache->get_k_storage(layer); } catch (const std::out_of_range &) {}
+                if (bool(storage) != (owned && !kda) || (storage && storage->type != GGML_TYPE_F16)) {
+                    throw std::runtime_error("stage allocated missing, unowned or reduced-precision MLA/index state");
+                }
+            }
+        }
+    }
+    for (int failure = 0; failure < 4; ++failure) {
+        auto invalid = params;
+        if (failure == 0) { invalid.type_k = GGML_TYPE_Q8_0; }
+        if (failure == 1) { invalid.n_ctx = 257; }
+        if (failure == 2) { invalid.n_rs_seq = 1; }
+        if (failure == 3) { invalid.attention_type = LLAMA_ATTENTION_TYPE_NON_CAUSAL; }
+        llama_context_ptr rejected(llama_init_stage_from_model(models[0].get(), invalid));
+        if (rejected) { throw std::runtime_error("stage accepted an unsupported context mode"); }
+    }
+    llama_context_ptr rejected(llama_init_stage_from_model(reference, params));
+    if (rejected) { throw std::runtime_error("stage API accepted a monolithic model"); }
+
+    const auto tokens = get_tokens(131, llama_vocab_n_tokens(llama_model_get_vocab(reference)), seed);
+    const size_t n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(reference));
+    llama_pos position = 0;
+    double max_boundary_error = 0, max_logit_error = 0;
+    for (const size_t count : {1, 3, 4, 17, 31, 64, 11}) {
+        for (auto & entry : boundaries.rows) { entry.second.clear(); }
+        common_batch ref_batch(oracle.get()), a_batch(contexts[0].get());
+        for (size_t row = 0; row < count; ++row) {
+            ref_batch.add(tokens.at(position + row), position + row, 0, true);
+            a_batch.add(tokens.at(position + row), position + row, 0, false);
+        }
+        if (llama_process(oracle.get(), LLAMA_PROCESS_TYPE_DECODE, ref_batch.get()) ||
+                llama_process(contexts[0].get(), LLAMA_PROCESS_TYPE_DECODE, a_batch.get())) {
+            throw std::runtime_error("stage A or reference decode failed");
+        }
+        const float * logits = llama_get_logits(oracle.get());
+        if (!logits) { throw std::runtime_error("reference logits missing"); }
+        const std::vector<float> expected_logits(logits, logits + count * n_vocab);
+        for (size_t rank = 0; rank < 2; ++rank) {
+            const auto & expected = boundaries.rows.at("l_out-" + std::to_string(models[rank]->stage.layer_ends[rank] - 1));
+            if (expected.size() != count * width) { throw std::runtime_error("incomplete reference boundary capture"); }
+            const float * residual = llama_get_embeddings(contexts[rank].get());
+            max_boundary_error = std::max(max_boundary_error, stage_compare(residual, expected));
+            common_batch input(contexts[rank + 1].get());
+            for (size_t row = 0; row < count; ++row) {
+                const llama_pos pos = position + row;
+                const bool output = rank == 1 && (count != 11 || row + 1 == count);
+                input.add_embd({residual + row * width, 1, width}, &pos, 0, output);
+            }
+            if (llama_process(contexts[rank + 1].get(), LLAMA_PROCESS_TYPE_DECODE, input.get())) {
+                throw std::runtime_error("stage B/C boundary decode failed");
+            }
+        }
+        if (count == 11) {
+            const std::vector<float> last(expected_logits.end() - n_vocab, expected_logits.end());
+            max_logit_error = std::max(max_logit_error, stage_compare(llama_get_logits_ith(contexts[2].get(), count - 1), last));
+        } else {
+            max_logit_error = std::max(max_logit_error, stage_compare(llama_get_logits(contexts[2].get()), expected_logits));
+        }
+        if (position == 0) {
+            // All failures must leave the committed position unchanged for the next valid chunk.
+            if (llama_process(contexts[0].get(), LLAMA_PROCESS_TYPE_DECODE, a_batch.get()) == 0) {
+                throw std::runtime_error("stage accepted duplicate positions");
+            }
+            common_batch wrong_input(contexts[1].get());
+            wrong_input.add(tokens[1], 1, 0, true);
+            common_batch next_input(contexts[0].get());
+            next_input.add(tokens[1], 1, 0, true);
+            if (llama_process(contexts[1].get(), LLAMA_PROCESS_TYPE_DECODE, wrong_input.get()) == 0 ||
+                    llama_process(contexts[0].get(), LLAMA_PROCESS_TYPE_ENCODE, next_input.get()) == 0) {
+                throw std::runtime_error("stage accepted tokens on B or noncausal encode");
+            }
+            llama_set_embeddings(contexts[0].get(), false);
+            if (llama_process(contexts[0].get(), LLAMA_PROCESS_TYPE_DECODE, next_input.get()) == 0) {
+                throw std::runtime_error("headless stage accepted disabled residual output");
+            }
+            llama_set_embeddings(contexts[0].get(), true);
+            llama_set_causal_attn(contexts[0].get(), false);
+            if (llama_process(contexts[0].get(), LLAMA_PROCESS_TYPE_DECODE, next_input.get()) == 0) {
+                throw std::runtime_error("stage accepted noncausal attention mutation");
+            }
+            llama_set_causal_attn(contexts[0].get(), true);
+        }
+        position += count;
+    }
+    common_batch interrupted(contexts[0].get());
+    interrupted.add(tokens[0], position, 0, false);
+    llama_set_abort_callback(contexts[0].get(), [](void *) { return true; }, nullptr);
+    if (llama_process(contexts[0].get(), LLAMA_PROCESS_TYPE_DECODE, interrupted.get()) == 0) {
+        throw std::runtime_error("stage abort callback did not interrupt computation");
+    }
+    llama_set_abort_callback(contexts[0].get(), nullptr, nullptr);
+    llama_memory_clear(llama_get_memory(contexts[0].get()), true);
+    common_batch reset_input(contexts[0].get());
+    reset_input.add(tokens[0], 0, 0, false);
+    if (llama_process(contexts[0].get(), LLAMA_PROCESS_TYPE_DECODE, reset_input.get()) == 0) {
+        throw std::runtime_error("failed stage context was reusable after clearing memory");
+    }
+    contexts[0].reset(llama_init_stage_from_model(models[0].get(), params));
+    if (!contexts[0]) { throw std::runtime_error("could not recreate a stage context"); }
+    common_batch recovered_input(contexts[0].get());
+    recovered_input.add(tokens[0], 0, 0, false);
+    if (llama_process(contexts[0].get(), LLAMA_PROCESS_TYPE_DECODE, recovered_input.get())) {
+        throw std::runtime_error("could not recover a stage context while retaining owned weights");
+    }
+    LOG("Stage forward: ends %u/%u/%u, 131 tokens, chunks 1/3/4/17/31/64/11, owned FP32 KDA/FP16 MLA+index state, max boundary error %.9g, max logit error %.9g\n",
+            models[0]->stage.layer_ends[0], models[0]->stage.layer_ends[1], models[0]->stage.layer_ends[2], max_boundary_error, max_logit_error);
+}
+
 static void test_owned_stage_loading(const size_t seed, const float stdev) {
     auto metadata = get_gguf_ctx(LLM_ARCH_GLM5_NEXT, true);
     gguf_set_val_u32(metadata.get(), "glm5-next.block_count", 6);
+    gguf_set_val_u32(metadata.get(), "glm5-next.expert_count", 16);
+    gguf_set_val_u32(metadata.get(), "glm5-next.expert_used_count", 8);
+    gguf_set_val_u32(metadata.get(), "glm5-next.attention.indexer.top_k", 8);
     const uint32_t heads[6] = {0, 1, 0, 1, 0, 1};
     gguf_set_arr_data(metadata.get(), "glm5-next.attention.head_count_kv", GGUF_TYPE_UINT32, heads, 6);
     tensor_data_params data{seed, stdev};
@@ -664,6 +844,7 @@ static void test_owned_stage_loading(const size_t seed, const float stdev) {
     llama_model_save_to_file(reference.get(), path.string().c_str());
 
     std::map<std::string, ggml_tensor *> tensors;
+    std::array<llama_model_ptr, 3> stage_models;
     for (const auto & entry : reference->tensors_by_name) { tensors.emplace(entry.first, entry.second); }
     for (uint32_t rank = 0; rank < 3; ++rank) {
         const llama_stage_model_params stage{1, rank, {2, 4, 6}};
@@ -702,6 +883,7 @@ static void test_owned_stage_loading(const size_t seed, const float stdev) {
             const auto rejected_export = directory / ("partial " + std::to_string(rank) + ".gguf");
             llama_model_save_to_file(owned.get(), rejected_export.string().c_str());
             if (std::filesystem::exists(rejected_export)) { throw std::runtime_error("partial model exported as a complete model"); }
+            if (!from_file) { stage_models[rank] = std::move(owned); }
         }
     }
     for (const auto & bad : std::vector<llama_stage_model_params>{{2, 0, {2,4,6}}, {1,3,{2,4,6}},
@@ -722,6 +904,13 @@ static void test_owned_stage_loading(const size_t seed, const float stdev) {
     if (lazy) { throw std::runtime_error("stage loader accepted inference-time lazy model reads"); }
     if (!std::filesystem::remove(path)) { throw std::runtime_error("stage fixture file remained open after loading"); }
     LOG("Stage-owned loading: three ranks, provider/file bytes, invalid plans and monolithic refusal passed\n");
+    test_owned_stage_forward(reference.get(), stage_models, seed);
+    params.lazy_mode = LLAMA_LAZY_MODE_OFF;
+    for (uint32_t rank = 0; rank < 3; ++rank) {
+        stage_models[rank].reset(llama_model_init_stage_from_user(metadata.get(), set_tensor_data, &data, params, {1,rank,{1,2,6}}));
+        if (!stage_models[rank]) { throw std::runtime_error("uneven stage fixture did not load"); }
+    }
+    test_owned_stage_forward(reference.get(), stage_models, seed);
 }
 
 static std::vector<float> get_logits(
@@ -1188,7 +1377,7 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
             }
             if (arch == LLM_ARCH_GLM5_NEXT && (!target_backend || std::strcmp(target_backend, "CPU") == 0)) {
                 test_owned_stage_loading(seed, stdev);
-                ++n_tests;
+                n_tests += 2;
             }
             std::pair<llama_model_ptr, llama_context_ptr> model_and_ctx_cpu;
             std::vector<float> logits_cpu;

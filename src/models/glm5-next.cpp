@@ -83,8 +83,7 @@ void llama_model_glm5_next::load_arch_tensors(llama_model_loader & ml) {
 
     for (int i = 0; i < n_layer_all; ++i) {
         if (stage_enabled) {
-            const uint32_t begin = stage.rank == 0 ? 0 : stage.layer_ends[stage.rank - 1];
-            if (uint32_t(i) < begin || uint32_t(i) >= stage.layer_ends[stage.rank]) {
+            if (!stage_owns_layer(uint32_t(i))) {
                 continue;
             }
         }
@@ -693,18 +692,39 @@ llama_model_glm5_next::graph::graph(const llama_model & model, const llm_graph_p
 
     ggml_tensor * cur;
 
-    ggml_tensor * inp = build_inp_embd(model.tok_embd);
-    cb(inp, "inp_embd", -1);
+    const int64_t hc = hparams.dsv4_hc_mult;
+    ggml_tensor * inpL;
+    if (model.stage_enabled && model.stage.rank > 0) {
+        auto input = std::make_unique<llm_graph_input_embd>(n_embd * hc);
+        input->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd * hc, n_tokens);
+        ggml_set_input(input->embd);
+        cb(input->embd, "stage_input", -1);
+        inpL = ggml_reshape_3d(ctx0, input->embd, n_embd, hc, n_tokens);
+        res->add_input(std::move(input));
+    } else {
+        ggml_tensor * inp = build_inp_embd(model.tok_embd);
+        cb(inp, "inp_embd", -1);
+        inpL = ggml_reshape_3d(ctx0, inp, n_embd, 1, n_tokens);
+        inpL = ggml_repeat_4d(ctx0, inpL, n_embd, hc, n_tokens, 1);
+        cb(inpL, "hc_init", -1);
+    }
 
     // recurrent state + K-only MLA cache through the generic hybrid input, plus the indexer cache
     const auto * mctx_hyb = static_cast<const llama_memory_hybrid_idx_context *>(mctx);
 
-    auto * inp_hyb   = build_inp_mem_hybrid_k();
+    const int begin = model.stage_enabled && model.stage.rank > 0 ? model.stage.layer_ends[model.stage.rank - 1] : 0;
+    const int end = model.stage_enabled ? model.stage.layer_ends[model.stage.rank] : n_layer;
+    bool with_attn = false, with_recr = false;
+    for (int il = begin; il < end; ++il) {
+        with_attn |= !hparams.is_recr(il);
+        with_recr |= hparams.is_recr(il);
+    }
+    auto * inp_hyb   = build_inp_mem_hybrid_k(with_attn, with_recr);
     auto * inp_rs    = inp_hyb->get_recr();
     auto * inp_attn  = inp_hyb->get_attn();
-    auto * inp_kpool = build_inp_kpool(mctx_hyb);
+    auto * inp_kpool = with_attn ? build_inp_kpool(mctx_hyb) : nullptr;
 
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    ggml_tensor * inp_out_ids = model.stage_enabled && model.stage.rank < 2 ? nullptr : build_inp_out_ids();
 
     const int64_t n_head_kda   = hparams.n_head();
     const int64_t head_dim     = hparams.n_embd_head_kda;
@@ -717,14 +737,9 @@ llama_model_glm5_next::graph::graph(const llama_model & model, const llm_graph_p
     GGML_ASSERT(ubatch.equal_seqs());
     GGML_ASSERT(ubatch.n_tokens == n_seq_tokens * n_seqs);
 
-    const int64_t hc = hparams.dsv4_hc_mult;
-    ggml_tensor * inpL = ggml_reshape_3d(ctx0, inp, n_embd, 1, n_tokens);
-    inpL = ggml_repeat_4d(ctx0, inpL, n_embd, hc, n_tokens, 1);
-    cb(inpL, "hc_init", -1);
-
     ggml_tensor * prev_sel = nullptr;
 
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = begin; il < end; ++il) {
         const auto & layer = model.layers[il];
 
         ggml_tensor * residual = inpL;
@@ -790,6 +805,13 @@ llama_model_glm5_next::graph::graph(const llama_model & model, const llm_graph_p
         inpL = build_hc_post(cur, residual, post, comb, il);
         inpL = build_cvec(inpL, il);
         cb(inpL, "l_out", il);
+    }
+
+    if (model.stage_enabled && model.stage.rank < 2) {
+        GGML_ASSERT(inpL->type == GGML_TYPE_F32);
+        res->t_embd = ggml_reshape_2d(ctx0, ggml_cont(ctx0, inpL), n_embd * hc, n_tokens);
+        cb(res->t_embd, "stage_output", -1);
+        return;
     }
 
     // narrow to the output tokens, then collapse the streams

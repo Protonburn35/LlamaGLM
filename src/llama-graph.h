@@ -1422,7 +1422,7 @@ struct llm_graph_context {
     //
 
     llm_graph_input_mem_hybrid * build_inp_mem_hybrid() const;
-    llm_graph_input_mem_hybrid_k * build_inp_mem_hybrid_k() const;
+    llm_graph_input_mem_hybrid_k * build_inp_mem_hybrid_k(bool with_attn = true, bool with_recr = true) const;
 
     llm_graph_input_mem_hybrid_iswa * build_inp_mem_hybrid_iswa() const;
 

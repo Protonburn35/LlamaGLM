@@ -1333,6 +1333,26 @@ void llama_prec_policy::load(llama_model_loader & ml, const llama_model & model)
     }
 }
 
+bool llama_model::stage_owns_layer(uint32_t layer) const {
+    if (!stage_enabled) { return true; }
+    const uint32_t begin = stage.rank == 0 ? 0 : stage.layer_ends[stage.rank - 1];
+    return layer >= begin && layer < stage.layer_ends[stage.rank];
+}
+
+static uint32_t stage_boundary_width(const llama_hparams & hparams) {
+    const uint64_t width = uint64_t(hparams.n_embd) * hparams.dsv4_hc_mult;
+    if (width > INT32_MAX) { throw std::overflow_error("stage boundary width overflow"); }
+    return uint32_t(width);
+}
+
+uint32_t llama_model::n_embd_inp() const {
+    return stage_enabled && stage.rank > 0 ? stage_boundary_width(hparams) : hparams.n_embd_inp();
+}
+
+uint32_t llama_model::n_embd_out() const {
+    return stage_enabled && stage.rank < 2 ? stage_boundary_width(hparams) : hparams.n_embd_out();
+}
+
 bool llama_model::stage_owns_tensor(const std::string & name) const {
     if (!stage_enabled) {
         return true;
@@ -1353,8 +1373,7 @@ bool llama_model::stage_owns_tensor(const std::string & name) const {
                 layer = layer * 10 + uint32_t(name[i] - '0');
             }
             if (canonical && layer < hparams.n_layer_all) {
-                const uint32_t begin = stage.rank == 0 ? 0 : stage.layer_ends[stage.rank - 1];
-                return layer >= begin && layer < stage.layer_ends[stage.rank];
+                return stage_owns_layer(layer);
             }
         }
     }
@@ -1927,7 +1946,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             pimpl->n_bytes += bytes;
             pimpl->n_elements += elements;
         }
-        LLAMA_LOG_INFO("%s: stage %u owns %zu tensors, %zu payload bytes; stage evaluation is not implemented\n",
+        LLAMA_LOG_INFO("%s: stage %u owns %zu tensors, %zu payload bytes\n",
                        __func__, stage.rank, tensors_by_name.size(), pimpl->n_bytes);
     }
 
@@ -2925,13 +2944,13 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                 // KDA layers are recurrent, the DSA layers use a K-only MLA cache plus an indexer cache.
                 // tThe Nextn block is never attended by the trunk graph
                 llama_memory_hybrid_idx::layer_filter_cb filter_attn = [&](uint32_t il) {
-                    return il < hparams.n_layer() && !hparams.is_recr(il);
+                    return stage_owns_layer(il) && il < hparams.n_layer() && !hparams.is_recr(il);
                 };
                 llama_memory_hybrid_idx::layer_filter_cb filter_idx = [&](uint32_t il) {
-                    return il < hparams.n_layer() && !hparams.is_recr(il) && hparams.is_indexer_full(il);
+                    return stage_owns_layer(il) && il < hparams.n_layer() && !hparams.is_recr(il) && hparams.is_indexer_full(il);
                 };
                 llama_memory_hybrid_idx::layer_filter_cb filter_recr = [&](uint32_t il) {
-                    return il < hparams.n_layer() && hparams.is_recr(il);
+                    return stage_owns_layer(il) && il < hparams.n_layer() && hparams.is_recr(il);
                 };
 
                 // the draft head is a single DSA layer
@@ -3366,6 +3385,12 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
 ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
     std::unique_ptr<llm_graph_context> llm = build_arch_graph(params);
 
+    if (stage_enabled && stage.rank < 2) {
+        ggml_build_forward_expand(llm->res->get_gf(), llm->res->t_embd);
+        llm->res->set_outputs(params);
+        return llm->res->get_gf();
+    }
+
     // add on pooling layer
     llm->build_pooling(cls, cls_b, cls_out, cls_out_b, cls_norm);
 
@@ -3436,11 +3461,11 @@ int32_t llama_model_n_embd(const llama_model * model) {
 }
 
 int32_t llama_model_n_embd_inp(const llama_model * model) {
-    return model->hparams.n_embd_inp();
+    return model->n_embd_inp();
 }
 
 int32_t llama_model_n_embd_out(const llama_model * model) {
-    return model->hparams.n_embd_out();
+    return model->n_embd_out();
 }
 
 int32_t llama_model_n_layer(const llama_model * model) {

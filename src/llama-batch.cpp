@@ -1156,7 +1156,8 @@ size_t llama_batch_ext_select_n_embd_state(llama_context_type ctx_type, const ll
 
 llama_batch_ext::llama_batch_ext(llama_context * ctx) :
         n_tokens_max(llama_n_batch(ctx)),
-        n_embd_inp(llama_batch_ext_select_n_embd_inp(ctx->get_cparams().ctx_type, llama_get_model(ctx)->arch, llama_get_model(ctx)->hparams)),
+        n_embd_inp(llama_get_model(ctx)->stage_enabled ? llama_get_model(ctx)->n_embd_inp() :
+            llama_batch_ext_select_n_embd_inp(ctx->get_cparams().ctx_type, llama_get_model(ctx)->arch, llama_get_model(ctx)->hparams)),
         n_embd_inp_enc(llama_get_model(ctx)->hparams.n_embd_inp_enc()),
         n_embd_state(llama_batch_ext_select_n_embd_state(ctx->get_cparams().ctx_type, llama_get_model(ctx)->hparams)),
         n_seq_max(llama_n_seq_max(ctx)),

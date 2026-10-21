@@ -372,6 +372,9 @@ private:
     // true until then, because the first output_reserve() runs before any graph is reserved
     bool graph_has_logits = true;
 
+    // A failed stage compute can leave recurrent state uncertain; recreate the context to recover.
+    bool stage_failed = false;
+
     // state of sched_copy_experts, reset before each graph compute
     struct copy_experts_info {
         const ggml_tensor *  ids = nullptr;

@@ -13,7 +13,7 @@ Full laptop residency/admission is **NOT_VALIDATED**. Experimental preload polic
 | CPU backend work_data and explicit-plan scratch | Optional fresh-backend capability selects the locked pool; bounded growth retains old scratch until replacement succeeds | Passes hosted native Windows CPU at 0fae41d97; production reserve/physical qualification remains |
 | GGML descriptors/contexts, graph metadata, tokenizer/config maps and allocator records | Ordinary heap/control allocations | Dedicated ownership, bounded accounting and native protection |
 | CPU/OpenMP threadpool/control data and stacks | Ordinary backend/runtime allocations | Bound/account and protect the inference working set |
-| Authenticated wire frames and reassembled activations | Protocol limits, authenticated completion and lifetime checks; ordinary vectors | Shared host budget, native protection and production peer/queue quotas |
+| Authenticated wire frames and reassembled activations | B fixture receives directly into one fixed verified native-locked activation buffer; outgoing frames write original immutable payloads without a packet copy | Control/crypto/header/kernel storage, aggregate budget, production peer/queue quotas and native qualification |
 | CUDA transfer staging | Ordinary backend/driver behavior; OS-locked payloads are not CUDA DMA registration | Explicit bounded transfer storage, lifetimes and admission |
 | GPU allocations and Windows/WDDM resources | Logical backend bank counters and configured limits only | Actual devices, measured available/reserved resources and residency validation |
 | OS, other processes and operating reserve | No complete physical admission | Capacity probes, explicit reserve and fail-before-READY policy |

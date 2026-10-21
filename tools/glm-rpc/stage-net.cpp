@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cerrno>
 #include <climits>
+#include <cstring>
 #include <utility>
 
 #ifdef _WIN32
@@ -365,9 +366,30 @@ frame read_frame(tcp_socket & socket, receiver & codec, deadline until) {
 
 void write_frame(tcp_socket & socket, sender & codec, header metadata, bytes_view payload, deadline until) {
     try {
-        const auto packet = codec.encode(metadata, payload);
-        socket.write_all({packet.data(), packet.size()}, until);
+        const auto raw = codec.encode_header(metadata,payload);
+        socket.write_all({raw.data(),raw.size()},until);
+        socket.write_all(payload,until);
     } catch (...) { socket.interrupt(); throw; }
+}
+
+frame_view read_frame_into(tcp_socket & socket, receiver & codec, uint8_t * storage, size_t capacity, deadline until) {
+    size_t clear_bytes = 0;
+    try {
+        wire_header raw;
+        socket.read_exact(raw.data(),raw.size(),until);
+        const auto metadata = codec.inspect(raw);
+        if ((!storage && metadata.payload_bytes) || metadata.payload_bytes > capacity) {
+            throw std::invalid_argument("GLM frame exceeds the caller-owned payload buffer");
+        }
+        clear_bytes = metadata.payload_bytes;
+        socket.read_exact(storage,metadata.payload_bytes,until);
+        codec.authenticate(raw,{storage,metadata.payload_bytes});
+        check_deadline(until);
+        return {metadata,{storage,metadata.payload_bytes}};
+    } catch (...) {
+        if (clear_bytes) { std::memset(storage,0,clear_bytes); }
+        socket.interrupt(); throw;
+    }
 }
 
 } // namespace glm_rpc

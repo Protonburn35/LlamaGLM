@@ -20,4 +20,10 @@ void send_boundary_bytes(tcp_socket & socket, sender & codec, header coordinates
 std::vector<float> receive_boundary(tcp_socket & socket, receiver & codec, header expected, const limits & bounds,
                                     uint64_t input_budget, deadline until);
 
+// Exclusive caller-owned float storage, reusable after synchronous consumption. Each
+// fragment reads directly into its final slice; no frame/reassembly payload is allocated.
+// Caller reserves/protects storage before peer work. Failure clears the entire active chunk.
+size_t receive_boundary_into(tcp_socket & socket, receiver & codec, header expected, const limits & bounds,
+                             float * storage, size_t capacity, deadline until);
+
 } // namespace glm_rpc

@@ -73,12 +73,16 @@ public:
     sender & operator=(const sender &) = delete;
 
     std::vector<uint8_t> encode(header metadata, bytes_view payload);
+    // Consumes one sequence after successful authentication. Keep payload immutable until
+    // its complete header/body write; a partial write requires connection disposal.
+    wire_header encode_header(header metadata, bytes_view payload);
 
 private:
     secret key;
     binding peer;
     limits bounds;
     uint64_t next_sequence = 1;
+    wire_header prepare(header metadata, bytes_view payload) const;
 };
 
 class receiver {

@@ -28,3 +28,6 @@ A separate test gives B seed 54 while A/C expect 53. Authenticated setup refuses
 Each 33-row forward data stream still carries 105,440 actual bytes including framing/proof/retry. Per-peer A control writes are 22,176 bytes after setup on both connections; A reads 15,584 from B and 24,224 from C in sampled mode. The legacy greedy control result path reads 23,360 from C for the same coordinates. Independent byte ledgers verify all actual socket counters. These are CPU/loopback observations, not target link performance.
 
 Production configuration/reset/API, grammar and the other sampling policies, durable client/RNG journals, complete B residency/GPU admission and physical target execution remain open. Real mixed-quant/GPU/three-PC/1M execution remains NOT_RUN.
+
+
+Native Windows qualification passes at c0ec31052, run 39590421567, for all fourteen CTest/seven GLM/native schema gates on CPU/SM89/SM120a hosted builds. Downloaded CPU evidence confirms seeded native RNG replay and configuration refusal. The later input-buffer extension is separate; see LOCKED_NETWORK_INPUT.md.

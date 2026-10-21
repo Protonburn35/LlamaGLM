@@ -13,6 +13,7 @@
 #include "stage-replies.h"
 #include "stage-sampling.h"
 #include "stage-sampling-codec.h"
+#include "stage-locked-pages.h"
 #include "glm-fixture-lock-quota.h"
 
 #include <nlohmann/json.hpp>
@@ -522,6 +523,9 @@ int main(int argc, char ** argv) {
             std::ofstream output(args.at("--output"), std::ios::binary | (published_rows ? std::ios::app : std::ios::trunc));
             require(bool(output), "cannot create fixture worker output");
             const auto bounds = agreed.bounds;
+            std::optional<glm_stage::locked_pages> network_input;
+            const size_t input_capacity = size_t(bounds.rows)*bounds.hidden*bounds.streams;
+            if (preloaded) { network_input.emplace(input_capacity*sizeof(float),256u<<10); }
             tcp_socket outgoing, incoming;
             std::unique_ptr<sender> tx;
             std::unique_ptr<receiver> rx;
@@ -568,6 +572,17 @@ int main(int argc, char ** argv) {
             size_t executions = 0, committed_retries = 0, network_retries = 0;
             size_t replayed_rows = 0, new_output_rows = 0;
             uint64_t compute_ns = 0;
+            size_t network_receives = 0, network_input_bytes = 0;
+            const auto receive_input = [&](const header & metadata, std::vector<float> & fallback) -> const float * {
+                if (network_input) {
+                    auto * data = reinterpret_cast<float *>(network_input->data());
+                    const auto count = receive_boundary_into(incoming,*rx,metadata,bounds,data,input_capacity,shortly());
+                    network_input->verify_locked(); ++network_receives; network_input_bytes += count*sizeof(float);
+                    return data;
+                }
+                fallback = receive_boundary(incoming,*rx,metadata,bounds,uint64_t(bounds.rows)*512*sizeof(float),shortly());
+                return fallback.data();
+            };
             size_t position = 0;
             try {
             for (size_t chunk = 0; chunk < expected_chunks.size(); ++chunk) {
@@ -597,17 +612,18 @@ int main(int argc, char ** argv) {
                 }
                 common_batch batch(context.get());
                 std::vector<float> input;
+                const float * input_values = nullptr;
                 if (rank == 0) {
                     for (uint32_t row = 0; row < count; ++row) { batch.add(actual_tokens.at(position + row), position + row, 0, false); }
                 } else {
                     metadata.sender = rank - 1; metadata.receiver = rank;
-                    input = receive_boundary(incoming, *rx, metadata, bounds, uint64_t(bounds.rows) * 512 * sizeof(float), shortly());
+                    input_values = receive_input(metadata,input);
                     for (uint32_t row = 0; row < count; ++row) {
                         const llama_pos pos = position + row;
-                        batch.add_embd({input.data() + row * 512, 1, 512}, &pos, 0, rank == 2);
+                        batch.add_embd({input_values + row * 512, 1, 512}, &pos, 0, rank == 2);
                     }
                 }
-                const auto input_digest = rank ? fingerprint_bytes(input.data(), input.size() * sizeof(float)) : step.request_digest;
+                const auto input_digest = rank ? fingerprint_bytes(input_values,count*512*sizeof(float)) : step.request_digest;
                 if (ledger) { require(ledger->prepare(step, input_digest) == step_disposition::execute, "fixture attempted duplicate graph execution"); }
                 const auto compute_started = std::chrono::steady_clock::now();
                 const int status = llama_process(context.get(), LLAMA_PROCESS_TYPE_DECODE, batch.get());
@@ -653,8 +669,8 @@ int main(int argc, char ** argv) {
                         auto repeated_input = step.request_digest;
                         if (rank) {
                             duplicate.sender = rank-1; duplicate.receiver = rank;
-                            input = receive_boundary(incoming, *rx, duplicate, bounds, uint64_t(bounds.rows)*512*sizeof(float), shortly());
-                            repeated_input = fingerprint_bytes(input.data(), input.size()*sizeof(float));
+                            input_values = receive_input(duplicate,input);
+                            repeated_input = fingerprint_bytes(input_values,count*512*sizeof(float));
                         }
                         require(ledger->prepare(step, repeated_input) == step_disposition::committed,
                                 "reconnected committed request attempted graph execution");
@@ -747,6 +763,11 @@ int main(int argc, char ** argv) {
             const json performance{{"rank",rank},{"generation",plan.generation},{"compute_ns",compute_ns},{"epoch_wall_ns",wall_ns},
                 {"data_in",io_evidence(incoming.io_stats())},{"data_out",io_evidence(outgoing.io_stats())},{"control",control_io}};
             std::printf("GLM_PIPELINE_IO %s\n",performance.dump().c_str());
+            if (network_input) { network_input->verify_locked(); }
+            const json network{{"rank",rank},{"input_capacity_bytes",network_input ? network_input->size() : 0},
+                {"locked_page_bytes",network_input ? network_input->locked_bytes() : 0},{"receives",network_receives},
+                {"input_bytes",network_input_bytes},{"native_locks_verified",bool(network_input)},{"full_residency_validated",false}};
+            std::printf("GLM_PIPELINE_NETWORK %s\n",network.dump().c_str());
             std::printf("GLM_PIPELINE_DONE %u %zu\n", rank, total_rows);
             std::fflush(stdout);
         };

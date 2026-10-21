@@ -248,6 +248,18 @@ def check_io(workers: list[Worker], transactional: bool = False, generation: int
               f"control read {sum(item['read_bytes'] for item in record['control'])}; "
               f"control written {sum(item['written_bytes'] for item in record['control'])}; "
               f"CPU compute ns {record['compute_ns']}; epoch wall ns {record['epoch_wall_ns']}")
+        network = [json.loads(line.removeprefix("GLM_PIPELINE_NETWORK ")) for line in worker.lines
+                   if line.startswith("GLM_PIPELINE_NETWORK ")]
+        active = worker.locked and worker.rank == 1
+        expected_bytes = sum(sizes) if active else 0
+        if len(network) != 1 or not (network[0]["rank"] == worker.rank and
+                network[0]["input_capacity_bytes"] == (64*512*4 if active else 0) and
+                network[0]["locked_page_bytes"] == (64*512*4 if active else 0) and
+                network[0]["receives"] == (len(sizes) if active else 0) and network[0]["input_bytes"] == expected_bytes and
+                network[0]["native_locks_verified"] is active and network[0]["full_residency_validated"] is False):
+            raise RuntimeError("worker did not use its fixed native-locked input buffer with exact complete receive counts")
+        if active:
+            print(f"LOCKED_NETWORK_INPUT_PASS: B reuses 131072 native-locked bytes; {len(sizes)} receives/{expected_bytes} actual input bytes; full admission NOT_VALIDATED")
 
 
 def run(oracle: pathlib.Path, executable: pathlib.Path, *, streamed: bool = False, locked: bool = False) -> None:

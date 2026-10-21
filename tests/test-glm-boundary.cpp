@@ -41,7 +41,7 @@ static std::vector<float> pattern(size_t count) {
     return values;
 }
 
-static void bit_exact(uint32_t rows, uint32_t hidden, uint32_t frame_bytes, bool canonical = false) {
+static void bit_exact(uint32_t rows, uint32_t hidden, uint32_t frame_bytes, bool canonical = false, bool reserved = false) {
     fixture f;
     f.bounds.hidden = f.expected.hidden = hidden; f.bounds.rows = f.expected.rows = rows;
     f.bounds.frame_bytes = frame_bytes;
@@ -53,6 +53,13 @@ static void bit_exact(uint32_t rows, uint32_t hidden, uint32_t frame_bytes, bool
         auto socket = listener.accept(shortly());
         const auto peer = authenticate_server(socket, f.psk, f.identity, shortly());
         receiver rx(derive_link_key(f.psk, peer), peer, f.bounds);
+        if (reserved) {
+            std::vector<float> input(values.size()+2,-1);
+            require(receive_boundary_into(socket,rx,f.expected,f.bounds,input.data()+1,values.size(),shortly()) == values.size() &&
+                    std::memcmp(input.data()+1,values.data(),f.expected.total_bytes) == 0 && input.front() == -1 && input.back() == -1,
+                    "caller-owned complete boundary changed bits or exceeded its exclusive storage");
+            return;
+        }
         const auto input = receive_boundary(socket, rx, f.expected, f.bounds, f.expected.total_bytes, shortly());
         require(input.size() == values.size() && std::memcmp(input.data(), values.data(), f.expected.total_bytes) == 0,
                 "fragment bridge changed IEEE FP32 bits or final positions");
@@ -213,12 +220,70 @@ static void canonical_size_refusal() {
     }
 }
 
+static void reserved_failures() {
+    for (int failure = 0; failure < 3; ++failure) {
+        fixture f; const auto values = pattern(size_t(f.expected.total_bytes/sizeof(float)));
+        auto listener = tcp_socket::listen({"127.0.0.1",0});
+        auto server = std::async(std::launch::async,[&] {
+            auto socket = listener.accept(shortly()); const auto peer = authenticate_server(socket,f.psk,f.identity,shortly());
+            receiver rx(derive_link_key(f.psk,peer),peer,f.bounds);
+            std::vector<float> input(values.size()+2,42);
+            bool rejected = false;
+            try { receive_boundary_into(socket,rx,f.expected,f.bounds,input.data()+1,values.size()-(failure == 0),shortly()); }
+            catch (const std::exception &) { rejected = true; }
+            require(rejected && input.front() == 42 && input.back() == 42,"caller-owned error escaped or damaged guard floats");
+            for (size_t i = 1; i+1 < input.size(); ++i) {
+                require(input[i] == (failure == 0 ? 42 : 0),"caller-owned failure retained partial input or erased an unaccepted buffer");
+            }
+            uint8_t byte;
+            try { socket.read_exact(&byte,1,shortly()); } catch (const io_error &) { return; }
+            throw std::runtime_error("caller-owned boundary failure left its connection reusable");
+        });
+        auto socket = tcp_socket::connect(listener.local_endpoint(),shortly());
+        const auto peer = authenticate_client(socket,f.psk,f.identity,shortly()); sender tx(derive_link_key(f.psk,peer),peer,f.bounds);
+        if (failure) {
+            write_frame(socket,tx,f.expected,{reinterpret_cast<const uint8_t *>(values.data()),f.bounds.frame_bytes},shortly());
+            if (failure == 1) { socket.interrupt(); }
+            else {
+                auto last = f.expected; last.fragment = 1;
+                auto packet = tx.encode(last,{reinterpret_cast<const uint8_t *>(values.data())+f.bounds.frame_bytes,
+                    size_t(f.expected.total_bytes-f.bounds.frame_bytes)});
+                packet.back() ^= 1; socket.write_all({packet.data(),packet.size()},shortly());
+            }
+        }
+        server.get();
+    }
+}
+
+static void reserved_frame_budget() {
+    fixture f;
+    auto listener = tcp_socket::listen({"127.0.0.1",0});
+    auto server = std::async(std::launch::async,[&] {
+        auto socket = listener.accept(shortly()); const auto peer = authenticate_server(socket,f.psk,f.identity,shortly());
+        receiver rx(derive_link_key(f.psk,peer),peer,f.bounds);
+        const auto initial = socket.io_stats().read_bytes;
+        std::array<uint8_t,6> storage{}; storage.fill(42);
+        bool rejected = false;
+        try { read_frame_into(socket,rx,storage.data()+1,4,shortly()); } catch (const std::invalid_argument &) { rejected = true; }
+        require(rejected && socket.io_stats().read_bytes-initial == wire_header_bytes &&
+                std::all_of(storage.begin(),storage.end(),[](auto value) { return value == 42; }),
+                "undersized caller frame buffer read a body or changed unowned bytes");
+    });
+    auto socket = tcp_socket::connect(listener.local_endpoint(),shortly());
+    const auto peer = authenticate_client(socket,f.psk,f.identity,shortly()); sender tx(derive_link_key(f.psk,peer),peer,f.bounds);
+    std::vector<uint8_t> payload(f.bounds.frame_bytes,0);
+    const auto raw = tx.encode_header(f.expected,{payload.data(),payload.size()});
+    socket.write_all({raw.data(),raw.size()},shortly()); server.get();
+}
+
 int main() {
     try {
         bit_exact(2048, 4096, max_frame_bytes); bit_exact(33, 128, 64u << 10);
         bit_exact(33,128,64u<<10,true); canonical_size_refusal();
+        bit_exact(33,128,64u<<10,false,true); bit_exact(2048,4096,max_frame_bytes,false,true);
+        reserved_failures(); reserved_frame_budget();
         completion_barrier(); coordinate_refusal(); broken_input(false); broken_input(true); reserved_budget(); chunk_deadline();
-        std::puts("GLM boundary: ten suites passed (128 MiB, tails, canonical cached bytes/size refusal, complete barrier, coordinates, truncation, MAC, budget, deadline)");
+        std::puts("GLM boundary: fourteen suites passed (128 MiB, tails, canonical/caller-owned bytes, zero-on-failure, pre-body capacity, complete barrier, coordinates, truncation, MAC, budget, deadline)");
         return 0;
     } catch (const std::exception & error) {
         std::fprintf(stderr, "GLM boundary test failed: %s\n", error.what());

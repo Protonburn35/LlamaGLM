@@ -165,7 +165,7 @@ sender::sender(const secret & key, const binding & peer, const limits & bounds) 
 
 sender::~sender() { erase_secret(key); }
 
-std::vector<uint8_t> sender::encode(header metadata, bytes_view payload) {
+wire_header sender::prepare(header metadata, bytes_view payload) const {
     if ((!payload.data && payload.size) || payload.size > max_frame_bytes) {
         throw std::invalid_argument("invalid or oversized GLM payload buffer");
     }
@@ -175,6 +175,15 @@ std::vector<uint8_t> sender::encode(header metadata, bytes_view payload) {
     auto raw = serialize(metadata);
     const auto tag = authenticate_frame(key, raw, payload);
     std::copy(tag.begin(), tag.end(), raw.begin() + wire_mac_offset);
+    return raw;
+}
+
+wire_header sender::encode_header(header metadata, bytes_view payload) {
+    auto result = prepare(metadata,payload); ++next_sequence; return result;
+}
+
+std::vector<uint8_t> sender::encode(header metadata, bytes_view payload) {
+    const auto raw = prepare(metadata,payload);
     std::vector<uint8_t> result(wire_header_bytes + payload.size);
     std::copy(raw.begin(), raw.end(), result.begin());
     if (payload.size) { std::memcpy(result.data() + wire_header_bytes, payload.data, payload.size); }

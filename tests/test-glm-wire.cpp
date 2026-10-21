@@ -373,14 +373,28 @@ static void handshake_replay() {
     }
 }
 
+static void header_only() {
+    fixture f;
+    sender full(f.key(),f.peer,f.bounds), separate(f.key(),f.peer,f.bounds);
+    const auto packet = full.encode(f.metadata,f.body());
+    const auto raw = separate.encode_header(f.metadata,f.body());
+    require(prefix(packet) == raw,"separate header differs from canonical complete packet");
+    receiver rx(f.key(),f.peer,f.bounds);
+    require(rx.authenticate(raw,f.body()).sequence == 1,"separate header did not authenticate original payload");
+    auto invalid = f.metadata; invalid.streams = 1;
+    refused([&] { separate.encode_header(invalid,f.body()); });
+    const auto next = separate.encode_header(f.metadata,f.body());
+    require(rx.authenticate(next,f.body()).sequence == 2,"refused header consumed a sequence or header reused an old one");
+}
+
 int main() {
     try {
         for (auto test : {crypto_vectors, binding_vectors, golden_frame, corruption_refusal,
                           sequence_refusal, shape_refusal, preallocation_refusal, bounded_fragments, control_isolation,
-                          handshake_exchange, handshake_corruption, handshake_replay}) {
+                          handshake_exchange, handshake_corruption, handshake_replay, header_only}) {
             test();
         }
-        std::puts("GLM wire: 12 suites passed; crypto vectors, framing, mutual proof, integrity, replay, limits and control isolation");
+        std::puts("GLM wire: 13 suites passed; crypto vectors, framing/separate headers, mutual proof, integrity, replay, limits and control isolation");
         return 0;
     } catch (const std::exception & error) {
         std::fprintf(stderr, "GLM wire test failed: %s\n", error.what());

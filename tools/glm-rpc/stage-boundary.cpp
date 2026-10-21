@@ -124,4 +124,32 @@ std::vector<float> receive_boundary(tcp_socket & socket, receiver & codec, heade
     } catch (...) { socket.interrupt(); throw; }
 }
 
+size_t receive_boundary_into(tcp_socket & socket, receiver & codec, header expected, const limits & bounds,
+                             float * storage, size_t capacity, deadline until) {
+    size_t clear_count = 0;
+    try {
+        check_deadline(until); expected = prepare(expected,bounds);
+        const size_t count = size_t(expected.total_bytes/sizeof(float));
+        if (!storage || capacity < count || capacity > max_chunk_bytes/sizeof(float)) {
+            throw std::invalid_argument("GLM boundary exceeds the caller-owned float buffer");
+        }
+        clear_count = count;
+        for (uint32_t i = 0; i < expected.fragments; ++i) {
+            const size_t offset = size_t(i)*bounds.frame_bytes;
+            const size_t size = size_t(std::min<uint64_t>(bounds.frame_bytes,expected.total_bytes-offset));
+            auto * destination = reinterpret_cast<uint8_t *>(storage)+offset;
+            const auto message = read_frame_into(socket,codec,destination,size,until);
+            if (!same_chunk(message.metadata,expected) || message.metadata.fragment != i || message.payload.size != size) {
+                throw std::invalid_argument("GLM boundary fragments differ from the active execution plan");
+            }
+            if (!little_endian()) { unpack(storage+offset/sizeof(float),message.payload); }
+            check_deadline(until);
+        }
+        return count;
+    } catch (...) {
+        if (clear_count) { std::memset(storage,0,clear_count*sizeof(float)); }
+        socket.interrupt(); throw;
+    }
+}
+
 } // namespace glm_rpc

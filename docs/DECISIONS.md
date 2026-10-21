@@ -90,3 +90,6 @@
 
 
 - Agree exact local sampling configuration before model BEGIN, including after healthy control reconnect, and require both distinct owner acknowledgements at A. Keep agreement separate from resource admission/READY. Bind canonical policy identity into actual fixture request hashes and a distinct sampled result with the committed native draw ordinal; preserve the existing greedy-only format. Qualify real seeded feedback and retained-model RNG replay against an independent native monolithic oracle.
+
+
+- Reserve/protect B activation input before peer work and authenticate each fragment directly in its exclusive final slice, exposing only complete chunks. Clear accepted active input on failure. Send the original immutable payload behind a separately authenticated fixed header. Preserve caller lifetime/one-writer/deadline rules and keep remaining control/crypto/kernel allocations and aggregate residency explicitly unvalidated.

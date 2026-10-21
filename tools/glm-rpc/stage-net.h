@@ -71,6 +71,12 @@ struct frame {
 };
 
 frame read_frame(tcp_socket & socket, receiver & codec, deadline until);
+// Exclusive caller-owned storage. No payload vector is allocated; contents are exposed
+// only after complete authentication. A later read reuses the caller's same buffer.
+// Failure clears bytes read into storage and permanently interrupts the connection.
+struct frame_view { header metadata; bytes_view payload; };
+frame_view read_frame_into(tcp_socket & socket, receiver & codec, uint8_t * storage, size_t capacity, deadline until);
+// Writes a fixed header then the immutable caller-owned payload without a packet copy.
 void write_frame(tcp_socket & socket, sender & codec, header metadata, bytes_view payload, deadline until);
 
 } // namespace glm_rpc

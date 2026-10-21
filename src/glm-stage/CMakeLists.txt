@@ -1,0 +1,9 @@
+add_library(llama-glm-storage STATIC stage-storage.cpp stage-expert-cache.cpp)
+target_include_directories(llama-glm-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_features(llama-glm-storage PUBLIC cxx_std_17)
+
+add_library(llama-glm-expert-bank STATIC stage-expert-bank.cpp)
+target_include_directories(llama-glm-expert-bank PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(llama-glm-expert-bank PUBLIC llama-glm-storage ggml)
+target_compile_features(llama-glm-expert-bank PUBLIC cxx_std_17)
+set_target_properties(llama-glm-storage llama-glm-expert-bank PROPERTIES POSITION_INDEPENDENT_CODE ON)

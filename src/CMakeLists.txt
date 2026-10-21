@@ -6,6 +6,10 @@ llama_add_compile_flags()
 
 # llama
 
+if (LLAMA_GLM_RPC)
+    add_subdirectory(glm-stage)
+endif()
+
 file(GLOB LLAMA_MODELS_SOURCES "models/*.cpp")
 
 set(LLAMA_CORE_SOURCES

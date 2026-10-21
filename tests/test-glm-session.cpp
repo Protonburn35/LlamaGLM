@@ -1,5 +1,6 @@
 #include "stage-session.h"
 #include "stage-session-codec.h"
+#include "stage-commit-barrier.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -417,11 +418,147 @@ static void authenticated_certificate() {
     erase_secret(key);
 }
 
+static void global_barrier_permutations() {
+    std::array<uint32_t, 3> apply_order{0, 1, 2};
+    do {
+        std::array<uint32_t, 3> commit_order{0, 1, 2};
+        do {
+            owners group;
+            const auto certificate = group.apply(step_for(group.stamp));
+            commit_barrier barrier(certificate.owners[0].step, group.bounds);
+            refused([&] { barrier.decision(); });
+            refused([&] { barrier.committed(); });
+            for (size_t i = 0; i < 3; ++i) {
+                const auto rank = apply_order[i];
+                barrier.record_applied(rank, certificate.owners[rank]);
+                barrier.record_applied(rank, certificate.owners[rank]);
+                refused([&] { barrier.committed(); });
+                require(barrier.phase() == (i < 2 ? barrier_phase::collecting : barrier_phase::decided),
+                        "duplicate applied receipt bypassed the three-owner decision barrier");
+                if (i < 2) { refused([&] { barrier.decision(); }); }
+            }
+            require(fingerprint_commit(barrier.decision(), group.bounds) == fingerprint_commit(certificate, group.bounds),
+                    "receipt collection changed the complete decision");
+            for (size_t i = 0; i < 3; ++i) {
+                const auto rank = commit_order[i];
+                const auto acknowledgement = make_commit_ack(group.values[rank]->commit(barrier.decision()), certificate, group.bounds);
+                barrier.record_committed(rank, acknowledgement);
+                barrier.record_committed(rank, acknowledgement);
+                barrier.record_applied(rank, certificate.owners[rank]);
+                require(barrier.phase() == (i < 2 ? barrier_phase::decided : barrier_phase::complete),
+                        "duplicate commit ACK counted as another owner");
+                if (i < 2) { refused([&] { barrier.committed(); }); }
+            }
+            require(barrier.committed().owners[2] == certificate.owners[2], "global barrier released a different C result");
+            barrier.invalidate();
+            refused([&] { barrier.committed(); });
+            refused([&] { barrier.record_applied(0, certificate.owners[0]); });
+            require(barrier.phase() == barrier_phase::invalid, "invalidated barrier revived");
+        } while (std::next_permutation(commit_order.begin(), commit_order.end()));
+    } while (std::next_permutation(apply_order.begin(), apply_order.end()));
+}
+
+static void global_barrier_refusals() {
+    owners group;
+    const auto certificate = group.apply(step_for(group.stamp));
+    const auto & step = certificate.owners[0].step;
+    commit_barrier barrier(step, group.bounds);
+    const auto acknowledgement = make_commit_ack(certificate.owners[0], certificate, group.bounds);
+    refused([&] { barrier.record_committed(0, acknowledgement); });
+    refused([&] { barrier.record_applied(1, certificate.owners[0]); });
+    refused([&] { barrier.record_applied(3, certificate.owners[0]); });
+    auto stale = certificate.owners[0]; ++stale.step.stamp.epoch;
+    refused([&] { barrier.record_applied(0, stale); });
+    require(barrier.phase() == barrier_phase::collecting, "rejected uncorrelated fact mutated the barrier");
+    barrier.record_applied(0, certificate.owners[0]);
+    auto changed = certificate.owners[0]; changed.output_digest[0] ^= 1;
+    refused([&] { barrier.record_applied(0, changed); });
+    require(barrier.phase() == barrier_phase::invalid, "conflicting applied result did not invalidate barrier");
+    for (int field = 0; field < 3; ++field) {
+        commit_barrier checked(step, group.bounds);
+        for (uint32_t rank = 0; rank < 3; ++rank) { checked.record_applied(rank, certificate.owners[rank]); }
+        auto wrong = acknowledgement;
+        if (field == 0) { wrong.certificate_digest[0] ^= 1; }
+        if (field == 1) { wrong.owner.output_digest[0] ^= 1; }
+        if (field == 2) { wrong.certificate_digest = {}; }
+        refused([&] { checked.record_committed(0, wrong); });
+        require(checked.phase() == barrier_phase::invalid, "conflicting committed ACK retained a usable barrier");
+        refused([&] { checked.committed(); });
+    }
+    commit_barrier broken(step, group.bounds);
+    auto disconnected = certificate.owners[1]; disconnected.input_digest[0] ^= 1;
+    broken.record_applied(1, disconnected); broken.record_applied(0, certificate.owners[0]);
+    refused([&] { broken.record_applied(2, certificate.owners[2]); });
+    require(broken.phase() == barrier_phase::invalid, "broken digest chain produced a decision");
+    // B never ACKs. Repeating A/C cannot publish; lost ACK invalidates all owners, even
+    // ones that committed locally. A fresh barrier/context epoch must replay from zero.
+    commit_barrier uncertain(step, group.bounds);
+    for (uint32_t rank = 0; rank < 3; ++rank) { uncertain.record_applied(rank, certificate.owners[rank]); }
+    for (uint32_t rank : {0u, 2u}) {
+        const auto ack = make_commit_ack(group.values[rank]->commit(uncertain.decision()), certificate, group.bounds);
+        uncertain.record_committed(rank, ack); uncertain.record_committed(rank, ack);
+    }
+    refused([&] { uncertain.committed(); });
+    uncertain.invalidate();
+    const auto fresh = stamp_for(2, 2);
+    for (auto & owner : group.values) { owner->invalidate(); owner->fresh_context(fresh); }
+    const auto replayed = group.apply(step_for(fresh));
+    commit_barrier replay(replayed.owners[0].step, group.bounds);
+    refused([&] { replay.record_applied(0, certificate.owners[0]); });
+    for (uint32_t rank = 0; rank < 3; ++rank) { replay.record_applied(rank, replayed.owners[rank]); }
+    for (uint32_t rank = 0; rank < 3; ++rank) {
+        replay.record_committed(rank, make_commit_ack(group.values[rank]->commit(replay.decision()), replayed, group.bounds));
+    }
+    require(replay.committed().owners[2].end_position == 17, "fresh epoch did not complete replay");
+}
+
+static void committed_ack_codec() {
+    const auto certificate = codec_fixture();
+    const auto bounds = small_bounds();
+    const auto & expected = certificate.owners[0].step;
+    const auto acknowledgement = make_commit_ack(certificate.owners[1], certificate, bounds);
+    const auto payload = encode_commit_ack(acknowledgement, bounds);
+    require(hex(sha256({{payload.data(), payload.size()}})) == "5280d8a96e117e039d307e7ee6d2248bbc5a1e502c9cc84e999825098fce0af1",
+            "commit ACK differs from independent Python little-endian golden bytes");
+    require(decode_commit_ack({payload.data(), payload.size()}, 1, expected, acknowledgement.certificate_digest, bounds).owner == acknowledgement.owner,
+            "commit ACK round trip lost the local committed receipt");
+    for (size_t length = 0; length < payload.size(); ++length) {
+        refused([&] { decode_commit_ack({payload.data(), length}, 1, expected, acknowledgement.certificate_digest, bounds); });
+    }
+    refused([&] { decode_commit_ack({nullptr, payload.size()}, 1, expected, acknowledgement.certificate_digest, bounds); });
+    for (size_t offset : {size_t(0), size_t(8), size_t(10), size_t(12), size_t(108), size_t(148), size_t(224), size_t(255)}) {
+        auto wrong = payload; wrong[offset] ^= 1;
+        refused([&] { decode_commit_ack({wrong.data(), wrong.size()}, 1, expected, acknowledgement.certificate_digest, bounds); });
+    }
+    const auto applied = encode_applied_receipt(certificate.owners[1], bounds);
+    refused([&] { decode_commit_ack({applied.data(), applied.size()}, 1, expected, acknowledgement.certificate_digest, bounds); });
+    refused([&] { decode_applied_receipt({payload.data(), payload.size()}, 1, expected, bounds); });
+    auto key = random_nonce();
+    binding peer{random_nonce(), random_nonce(), expected.stamp.identity, 1, 0, channel::control};
+    auto derived = derive_link_key(key, peer); erase_secret(key);
+    sender tx(derived, peer, bounds); receiver rx(derived, peer, bounds);
+    header metadata; metadata.type = kind::commit_ack; metadata.sender = 1; metadata.receiver = 0;
+    metadata.session = expected.stamp.session; metadata.epoch = expected.stamp.epoch; metadata.generation = expected.stamp.generation;
+    metadata.transaction = expected.transaction; metadata.chunk = expected.chunk; metadata.position = expected.position;
+    metadata.payload_bytes = uint32_t(payload.size()); metadata.total_bytes = payload.size();
+    const auto packet = tx.encode(metadata, {payload.data(), payload.size()});
+    wire_header raw{}; std::copy_n(packet.begin(), raw.size(), raw.begin());
+    auto verified = rx.authenticate(raw, {packet.data() + raw.size(), payload.size()});
+    require(decode_committed_ack(verified, {packet.data() + raw.size(), payload.size()}, expected,
+            acknowledgement.certificate_digest, bounds).owner.rank == 1, "authenticated commit ACK lost its rank");
+    verified.type = kind::state_ack;
+    refused([&] { decode_committed_ack(verified, {payload.data(), payload.size()}, expected, acknowledgement.certificate_digest, bounds); });
+    verified.type = kind::commit_ack; verified.receiver = 2;
+    refused([&] { decode_committed_ack(verified, {payload.data(), payload.size()}, expected, acknowledgement.certificate_digest, bounds); });
+    erase_secret(derived);
+}
+
 int main() {
     try {
         happy_and_expired(); malformed_requests(); conflicts(); certificate_barrier(); uncertain_reset(); reset_and_capacity();
         codec_golden(); codec_refusals(); authenticated_certificate();
-        std::puts("GLM session ledger: nine suites passed (retry states, bounds, conflicts, A/B/C certificates, uncertain reset, epochs/capacity, independent codec vectors, malformed payloads, authenticated control); global commit/model dispatch NOT_IMPLEMENTED");
+        global_barrier_permutations(); global_barrier_refusals(); committed_ack_codec();
+        std::puts("GLM session control: twelve suites passed (owner lifecycle, codecs/authentication, distinct certificate-bound commit ACKs, all-three barrier, permutations, conflicts, uncertain reset/replay); model dispatch/reply publication NOT_IMPLEMENTED");
         return 0;
     } catch (const std::exception & error) {
         std::fprintf(stderr, "GLM session ledger test failed: %s\n", error.what()); return 1;

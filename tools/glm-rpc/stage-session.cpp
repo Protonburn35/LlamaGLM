@@ -48,6 +48,12 @@ void check_key(const step_key & step, const limits & bounds) {
 } // namespace
 
 bool operator==(const step_key & a, const step_key & b) { return same(a, b); }
+bool operator==(const owner_receipt & a, const owner_receipt & b) { return same(a, b); }
+
+void validate_step(const step_key & step, const limits & bounds) {
+    bounds.validate();
+    check_key(step, bounds);
+}
 
 void validate_receipt(const owner_receipt & receipt, const limits & bounds) {
     bounds.validate();

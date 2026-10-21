@@ -16,7 +16,7 @@ using session_id = std::array<uint8_t, 16>;
 enum class channel : uint8_t { data = 1, control = 2 };
 enum class kind : uint16_t {
     hello = 1, capabilities, ready, begin, reset, boundary, state_ack,
-    commit, abort, cancel, cancel_ack, heartbeat, error,
+    commit, abort, cancel, cancel_ack, heartbeat, error, commit_ack,
 };
 enum class dtype : uint16_t { none = 0, f32 = 1 };
 

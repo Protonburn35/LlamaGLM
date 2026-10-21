@@ -7,7 +7,7 @@ namespace glm_rpc {
 namespace {
 
 constexpr std::array<uint8_t, 8> magic{'G','L','M','T','X','N',0,0};
-constexpr uint16_t format_version = 1, receipt_kind = 1, commit_kind = 2;
+constexpr uint16_t format_version = 1, receipt_kind = 1, commit_kind = 2, commit_ack_kind = 3;
 static_assert(commit_wire_bytes <= max_control_bytes, "transaction certificate must fit one bounded control frame");
 
 template<size_t N> struct writer {
@@ -113,6 +113,29 @@ commit_wire encode_commit_certificate(const commit_certificate & certificate, co
     return encoded.finish();
 }
 
+digest fingerprint_commit(const commit_certificate & certificate, const limits & bounds) {
+    const auto encoded = encode_commit_certificate(certificate, bounds);
+    return sha256({{encoded.data(), encoded.size()}});
+}
+
+commit_acknowledgement make_commit_ack(const owner_receipt & committed, const commit_certificate & certificate, const limits & bounds) {
+    validate_receipt(committed, bounds);
+    const auto fingerprint = fingerprint_commit(certificate, bounds);
+    if (!(committed == certificate.owners[committed.rank])) {
+        throw std::invalid_argument("committed receipt differs from its complete certificate");
+    }
+    return {committed, fingerprint};
+}
+
+commit_ack_wire encode_commit_ack(const commit_acknowledgement & acknowledgement, const limits & bounds) {
+    validate_receipt(acknowledgement.owner, bounds);
+    if (acknowledgement.certificate_digest == digest{}) { throw std::invalid_argument("missing commit certificate fingerprint"); }
+    writer<commit_ack_wire_bytes> encoded;
+    encoded.prefix(commit_ack_kind); encoded.key(acknowledgement.owner.step); encoded.owner(acknowledgement.owner);
+    encoded.block(acknowledgement.certificate_digest);
+    return encoded.finish();
+}
+
 owner_receipt decode_applied_receipt(bytes_view payload, uint32_t authenticated_rank, const step_key & expected, const limits & bounds) {
     if (authenticated_rank > 2) { throw std::invalid_argument("invalid authenticated receipt rank"); }
     reader encoded(payload, receipt_wire_bytes, receipt_kind);
@@ -137,6 +160,20 @@ commit_certificate decode_commit_certificate(bytes_view payload, const step_key 
     return certificate;
 }
 
+commit_acknowledgement decode_commit_ack(bytes_view payload, uint32_t authenticated_rank, const step_key & expected,
+        const digest & expected_certificate, const limits & bounds) {
+    if (authenticated_rank > 2 || expected_certificate == digest{}) { throw std::invalid_argument("invalid commit acknowledgement expectation"); }
+    reader encoded(payload, commit_ack_wire_bytes, commit_ack_kind);
+    const auto key = encoded.key();
+    commit_acknowledgement result; result.owner = encoded.owner(key); encoded.block(result.certificate_digest);
+    encoded.finish();
+    validate_receipt(result.owner, bounds);
+    if (result.owner.rank != authenticated_rank || !(key == expected) || result.certificate_digest != expected_certificate) {
+        throw std::invalid_argument("commit acknowledgement differs from its authenticated owner/key/certificate");
+    }
+    return result;
+}
+
 owner_receipt decode_applied_ack(const header & authenticated, bytes_view payload, const step_key & expected, const limits & bounds) {
     check_control(authenticated, kind::state_ack, payload, expected);
     if (authenticated.receiver != 0) { throw std::invalid_argument("applied acknowledgement requires coordinator A"); }
@@ -147,6 +184,13 @@ commit_certificate decode_commit_decision(const header & authenticated, bytes_vi
     check_control(authenticated, kind::commit, payload, expected);
     if (authenticated.sender != 0) { throw std::invalid_argument("commit decision requires coordinator A"); }
     return decode_commit_certificate(payload, expected, bounds);
+}
+
+commit_acknowledgement decode_committed_ack(const header & authenticated, bytes_view payload, const step_key & expected,
+        const digest & expected_certificate, const limits & bounds) {
+    check_control(authenticated, kind::commit_ack, payload, expected);
+    if (authenticated.receiver != 0) { throw std::invalid_argument("commit acknowledgement requires coordinator A"); }
+    return decode_commit_ack(payload, authenticated.sender, expected, expected_certificate, bounds);
 }
 
 } // namespace glm_rpc

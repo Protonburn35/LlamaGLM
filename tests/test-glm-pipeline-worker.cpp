@@ -65,6 +65,7 @@ struct epoch_plan {
     uint16_t next_port = 0;
     std::array<uint16_t,3> controls{};
     bool drop_ack = false;
+    uint32_t drop_chunk = 0;
 };
 
 static epoch_plan read_recovery_plan(uint32_t rank, const epoch_plan & previous) {
@@ -239,7 +240,7 @@ int main(int argc, char ** argv) {
                     arg.first == "--output" || arg.first == "--next-port" || arg.first == "--key-file" ||
                     arg.first == "--storage" || arg.first == "--session" || arg.first == "--generation" ||
                     arg.first == "--control-b" || arg.first == "--control-c" || arg.first == "--drop-commit-ack" ||
-                    arg.first == "--recover-once",
+                    arg.first == "--recover-once" || arg.first == "--drop-commit-at",
                     "unknown pipeline worker argument");
         }
         const auto storage_mode = args.count("--storage") ? args.at("--storage") : "buffered";
@@ -251,6 +252,8 @@ int main(int argc, char ** argv) {
         const bool recover_once = args.count("--recover-once") && integer(args.at("--recover-once"),1);
         require(!recover_once || transactional, "retained recovery requires transactional fixture mode");
         const bool drop_ack = args.count("--drop-commit-ack") && integer(args.at("--drop-commit-ack"), 1);
+        const auto drop_chunk = args.count("--drop-commit-at") ? integer(args.at("--drop-commit-at"),6) : 0;
+        require(!args.count("--drop-commit-at") || drop_ack, "failure position requires lost-ACK injection");
         require(!drop_ack || (transactional && rank == 1), "lost-ACK injection is limited to transactional fixture B");
         require(!transactional || locked, "transaction fixture requires the small locked-host profile");
         session_id session{};
@@ -379,7 +382,7 @@ int main(int argc, char ** argv) {
         context_params.n_threads = context_params.n_threads_batch = 2;
         context_params.offload_kqv = false;
         context_params.op_offload = false;
-        epoch_plan initial{session,generation,next_port,{},drop_ack};
+        epoch_plan initial{session,generation,next_port,{},drop_ack,drop_chunk};
         if (transactional && rank == 0) {
             initial.controls[1] = uint16_t(integer(args.at("--control-b"),65535));
             initial.controls[2] = uint16_t(integer(args.at("--control-c"),65535));
@@ -388,6 +391,10 @@ int main(int argc, char ** argv) {
         if (preloaded) { require(llama_model_stage_host_report(model.get(),&baseline), "missing baseline host report"); }
         size_t contexts_created = 0;
         bool epoch_invalidated = false;
+        // Fixed fixture response journal survives context reset. It holds only fingerprints
+        // of already globally completed output; it is not a prefix cache or durable snapshot.
+        std::array<digest,7> published_fingerprints{};
+        size_t published_chunks = 0, published_rows = 0;
         const auto execute_epoch = [&](const epoch_plan & plan) {
             const auto & session = plan.session;
             const auto generation = plan.generation;
@@ -397,7 +404,7 @@ int main(int argc, char ** argv) {
             llama_context_ptr context(llama_init_stage_from_model(model.get(), context_params));
             require(bool(context), "owned fixture context failed to initialize");
             ++contexts_created;
-            std::ofstream output(args.at("--output"), std::ios::binary);
+            std::ofstream output(args.at("--output"), std::ios::binary | (published_rows ? std::ios::app : std::ios::trunc));
             require(bool(output), "cannot create fixture worker output");
             const auto bounds = agreed.bounds;
             tcp_socket outgoing, incoming;
@@ -437,6 +444,7 @@ int main(int argc, char ** argv) {
             }
             json commits = json::array();
             size_t executions = 0, committed_retries = 0, network_retries = 0;
+            size_t replayed_rows = 0, new_output_rows = 0;
             size_t position = 0;
             try {
             for (size_t chunk = 0; chunk < expected_chunks.size(); ++chunk) {
@@ -483,7 +491,7 @@ int main(int argc, char ** argv) {
                     send_boundary(outgoing, *tx, metadata, bounds, values, count * 512, shortly());
                 }
                 if (transactional) {
-                    const auto decision = finish_transaction(rank, step, *receipt, *ledger, *replies, controls, bounds, drop_ack && chunk == 0);
+                    const auto decision = finish_transaction(rank, step, *receipt, *ledger, *replies, controls, bounds, drop_ack && chunk == plan.drop_chunk);
                     const auto committed_hash = fingerprint_commit(decision, bounds);
                     std::string encoded_hash;
                     for (const auto byte : committed_hash) {
@@ -523,8 +531,21 @@ int main(int argc, char ** argv) {
                     }
                 }
                 const auto output_bytes = retained ? retained->payload() : bytes_view{reinterpret_cast<const uint8_t *>(values),bytes};
-                output.write(reinterpret_cast<const char *>(output_bytes.data), output_bytes.size);
-                require(bool(output), "cannot write fixture worker output");
+                if (transactional && chunk < published_chunks) {
+                    require(receipt->output_digest == published_fingerprints[chunk] && position+count <= published_rows &&
+                            replayed_rows == position, "replayed committed response history changed");
+                    replayed_rows += count;
+                } else {
+                    if (transactional) {
+                        require(chunk == published_chunks && position == published_rows, "response cursor skipped committed history");
+                    }
+                    output.write(reinterpret_cast<const char *>(output_bytes.data), output_bytes.size);
+                    require(bool(output), "cannot write fixture worker output");
+                    if (transactional) {
+                        published_fingerprints[published_chunks++] = receipt->output_digest;
+                        published_rows += count; new_output_rows += count;
+                    }
+                }
                 position += count;
             }
             } catch (...) {
@@ -552,6 +573,7 @@ int main(int argc, char ** argv) {
                 const json evidence{{"rank",rank}, {"generation",generation}, {"executions",executions}, {"model_loads",model_loads}, {"contexts_created",contexts_created},
                     {"committed_retries",committed_retries}, {"committed_position",ledger->committed_position()},
                     {"network_retries",network_retries},
+                    {"replayed_rows",replayed_rows}, {"new_output_rows",new_output_rows}, {"published_rows",published_rows},
                     {"certificates",commits}, {"reply_bytes",retained.payload_bytes}, {"peak_reply_bytes",retained.peak_payload_bytes},
                     {"reply_page_bytes",retained.page_bytes}, {"peak_reply_page_bytes",retained.peak_page_bytes},
                     {"full_residency_validated",false}};

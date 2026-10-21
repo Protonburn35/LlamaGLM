@@ -617,13 +617,52 @@ static void terminal_codec() {
     }
 }
 
+static void begin_codec() {
+    const auto fixture = codec_fixture();
+    const auto bounds = small_bounds();
+    const auto & step = fixture.owners[0].step;
+    const begin_coordinates expected{step.stamp,step.transaction,step.chunk,step.position,step.rows};
+    const auto payload = encode_step_begin(step,bounds);
+    require(hex(sha256({{payload.data(),payload.size()}})) == "53747be8093834c18af123596fc5014e835ec1ef398992f02aeaf774e21bcf90",
+            "BEGIN differs from independent Python little-endian golden bytes");
+    header metadata; metadata.type = kind::begin; metadata.sender = 0; metadata.receiver = 1;
+    metadata.session = step.stamp.session; metadata.epoch = step.stamp.epoch; metadata.generation = step.stamp.generation;
+    metadata.transaction = step.transaction; metadata.chunk = step.chunk; metadata.position = step.position;
+    metadata.payload_bytes = uint32_t(payload.size()); metadata.total_bytes = payload.size(); metadata.sequence = 1;
+    require(decode_step_begin(metadata,{payload.data(),payload.size()},expected,bounds) == step, "BEGIN lost its full request key");
+    for (size_t length = 0; length < payload.size(); ++length) {
+        auto short_header = metadata; short_header.payload_bytes = uint32_t(length); short_header.total_bytes = length;
+        refused([&] { decode_step_begin(short_header,{payload.data(),length},expected,bounds); });
+    }
+    refused([&] { decode_step_begin(metadata,{nullptr,payload.size()},expected,bounds); });
+    for (size_t offset : {size_t(0),size_t(8),size_t(10),size_t(12),size_t(16),size_t(48),size_t(64),size_t(72),
+            size_t(80),size_t(88),size_t(96),size_t(104),size_t(108)}) {
+        auto wrong = payload; wrong[offset] ^= 0x80;
+        refused([&] { decode_step_begin(metadata,{wrong.data(),wrong.size()},expected,bounds); });
+    }
+    auto wrong_role = metadata; wrong_role.sender = 2;
+    refused([&] { decode_step_begin(wrong_role,{payload.data(),payload.size()},expected,bounds); });
+    auto wrong_phase = metadata; wrong_phase.type = kind::commit;
+    refused([&] { decode_step_begin(wrong_phase,{payload.data(),payload.size()},expected,bounds); });
+    auto changed_request = step; changed_request.request_digest[0] ^= 1;
+    const auto different = encode_step_begin(changed_request,bounds);
+    require(decode_step_begin(metadata,{different.data(),different.size()},expected,bounds) == changed_request,
+            "BEGIN incorrectly required workers to know A's new token request");
+    owners committed;
+    const auto original = committed.apply(step_for(committed.stamp)); committed.commit(original);
+    auto conflict = original.owners[1].step; conflict.request_digest[0] ^= 1;
+    refused([&] { committed.values[1]->prepare(conflict,original.owners[1].input_digest); });
+    require(committed.values[1]->phase() == owner_phase::invalid, "changed duplicate BEGIN bypassed semantic request dedup");
+}
+
 int main() {
     try {
         happy_and_expired(); malformed_requests(); conflicts(); certificate_barrier(); uncertain_reset(); reset_and_capacity();
         codec_golden(); codec_refusals(); authenticated_certificate();
         global_barrier_permutations(); global_barrier_refusals(); committed_ack_codec();
         terminal_codec();
-        std::puts("GLM session control: thirteen suites passed (owner lifecycle, codecs/authentication, commit ACKs/barrier, reset/replay, compact greedy terminal outcomes); production dispatch/publication NOT_IMPLEMENTED");
+        begin_codec();
+        std::puts("GLM session control: fourteen suites passed (owner lifecycle, codecs/authentication, BEGIN agreement, commit ACKs/barrier, reset/replay, compact greedy outcomes); production dispatch/publication NOT_IMPLEMENTED");
         return 0;
     } catch (const std::exception & error) {
         std::fprintf(stderr, "GLM session ledger test failed: %s\n", error.what()); return 1;

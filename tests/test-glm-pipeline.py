@@ -20,7 +20,8 @@ class Worker:
     def __init__(self, executable: pathlib.Path, data: pathlib.Path, key_file: pathlib.Path, output: pathlib.Path,
                  rank: int, next_port: int = 0, *, streamed: bool = False, locked: bool = False,
                  session: str | None = None, generation: int = 1, controls: tuple[int, int] | None = None,
-                 drop_ack: bool = False, recover_once: bool = False, drop_chunk: int = 0):
+                 drop_ack: bool = False, recover_once: bool = False, drop_chunk: int = 0,
+                 requests_override: pathlib.Path | None = None):
         self.rank = rank
         self.locked = locked
         self.source_removed = False
@@ -34,7 +35,7 @@ class Worker:
         self.log_path = output.with_suffix(".log")
         self.log = self.log_path.open("wb")
         command = [str(executable), "--rank", str(rank), "--model", str(self.model_path),
-                   "--requests", str(data / "requests.json"), "--key-file", str(key_file), "--output", str(output),
+                   "--requests", str(requests_override or data / "requests.json"), "--key-file", str(key_file), "--output", str(output),
                    "--storage", "locked" if locked else "streamed" if streamed else "buffered"]
         if next_port:
             command += ["--next-port", str(next_port)]
@@ -213,8 +214,8 @@ def check_io(workers: list[Worker], transactional: bool = False, generation: int
     # Exact byte ledger includes fixed handshakes and every frame; syscall counts/times
     # remain measured OS-dependent values. No TCP/IP overhead or GPU throughput is implied.
     forwarded = 131*512*4 + 8*160 + 160 + (512*4+160 if transactional else 0)
-    controls = {0: [(0,0),(7040,7360),(10496,7360)],
-                1: [(7360,7040),(0,0),(0,0)], 2: [(7360,10496),(0,0),(0,0)]}
+    controls = {0: [(0,0),(7040,9792),(10496,9792)],
+                1: [(9792,7040),(0,0),(0,0)], 2: [(9792,10496),(0,0),(0,0)]}
     for worker in workers:
         records = [json.loads(line.removeprefix("GLM_PIPELINE_IO ")) for line in worker.lines
                    if line.startswith("GLM_PIPELINE_IO ")]
@@ -367,6 +368,10 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path) -> None:
         if generated.returncode != 0 or "GLM pipeline oracle:" not in generated.stdout:
             raise RuntimeError(f"transaction oracle failed: {generated.stderr[-4000:]}")
         requests = json.loads((data / "requests.json").read_text())
+        worker_plan = dict(requests)
+        del worker_plan["tokens"]
+        opaque_requests = root / "worker-coordinates-only.json"
+        opaque_requests.write_text(json.dumps(worker_plan))
 
         def terminal_oracle() -> list[dict]:
             logits = (data / "oracle-2.f32le").read_bytes()
@@ -389,12 +394,12 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path) -> None:
             workers: list[Worker] = []
             try:
                 c = Worker(executable, data, key_file, root / f"{label}-C.f32le", 2,
-                           locked=True, session=session, generation=generation, recover_once=recover_once)
+                           locked=True, session=session, generation=generation, recover_once=recover_once, requests_override=opaque_requests)
                 workers.append(c)
                 c_port = c.listen_port()
                 b = Worker(executable, data, key_file, root / f"{label}-B.f32le", 1, c_port,
                            locked=True, session=session, generation=generation, drop_ack=drop_ack,
-                           recover_once=recover_once, drop_chunk=drop_chunk)
+                           recover_once=recover_once, drop_chunk=drop_chunk, requests_override=opaque_requests)
                 workers.append(b)
                 b_port = b.listen_port()
                 if not b.control_port or not c.control_port:
@@ -476,6 +481,7 @@ def run_transactions(oracle: pathlib.Path, executable: pathlib.Path) -> None:
                       f"byte-exact boundaries/logits; max error {maximum:.9g}; full admission NOT_VALIDATED")
                 print("CONTROL_RECONNECT_RETRY_PASS: fresh handshakes/counters; duplicate boundary/commit served from immutable replies; no extra graph calls")
                 print("COMPACT_TERMINAL_PASS: native C greedy token/top eight match independent oracle; 272 bytes per result; retry outcome unchanged")
+                print("AUTHENTICATED_BEGIN_PASS: B/C receive no token plan; A introduces actual request digest within locally expected state coordinates")
                 if recover_once:
                     print("RETAINED_WEIGHT_RESET_REPLAY_PASS: same three processes/owned models; two real contexts each; B source stays removed; newer epoch replays exact oracle")
                     if drop_chunk:

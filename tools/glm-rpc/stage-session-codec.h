@@ -9,11 +9,20 @@ constexpr size_t commit_wire_bytes = 384;
 constexpr size_t commit_ack_wire_bytes = 256;
 constexpr size_t completion_wire_bytes = 176;
 constexpr size_t terminal_wire_bytes = 272;
+constexpr size_t begin_wire_bytes = 144;
 using receipt_wire = std::array<uint8_t, receipt_wire_bytes>;
 using commit_wire = std::array<uint8_t, commit_wire_bytes>;
 using commit_ack_wire = std::array<uint8_t, commit_ack_wire_bytes>;
 using completion_wire = std::array<uint8_t, completion_wire_bytes>;
 using terminal_wire = std::array<uint8_t, terminal_wire_bytes>;
+using begin_wire = std::array<uint8_t, begin_wire_bytes>;
+
+// Locally expected state coordinates before A establishes this request's fingerprint.
+struct begin_coordinates {
+    epoch_stamp stamp;
+    uint64_t transaction = 0, chunk = 0, position = 0;
+    uint32_t rows = 0;
+};
 
 struct terminal_candidate {
     uint32_t token = 0;
@@ -40,6 +49,7 @@ commit_ack_wire encode_commit_ack(const commit_acknowledgement & acknowledgement
 // Coordinator calls only with commit_barrier::committed(), after all three commit ACKs.
 completion_wire encode_commit_completion(const commit_certificate & committed, const limits & bounds);
 terminal_wire encode_terminal_outcome(const terminal_outcome & outcome, const limits & bounds);
+begin_wire encode_step_begin(const step_key & step, const limits & bounds);
 
 // Authenticate the enclosing control frame first. Pass the authenticated peer rank and
 // locally pending key; fixed lengths, reserved fields and semantic compatibility are checked.
@@ -60,5 +70,8 @@ void decode_commit_completion(const header & authenticated, bytes_view payload, 
         const digest & expected_certificate, const limits & bounds);
 terminal_outcome decode_terminal_outcome(const header & authenticated, bytes_view payload, const step_key & expected,
         const digest & expected_certificate, uint32_t expected_vocabulary, uint32_t expected_candidates, const limits & bounds);
+// Authenticate first. Only A introduces the request hash; all state coordinates remain local.
+// A duplicate's returned full key must still match owner-ledger/cached history before reuse.
+step_key decode_step_begin(const header & authenticated, bytes_view payload, const begin_coordinates & expected, const limits & bounds);
 
 } // namespace glm_rpc

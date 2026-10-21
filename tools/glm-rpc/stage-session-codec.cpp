@@ -10,7 +10,7 @@ namespace glm_rpc {
 namespace {
 
 constexpr std::array<uint8_t, 8> magic{'G','L','M','T','X','N',0,0};
-constexpr uint16_t format_version = 1, receipt_kind = 1, commit_kind = 2, commit_ack_kind = 3, completion_kind = 4, terminal_kind = 5;
+constexpr uint16_t format_version = 1, receipt_kind = 1, commit_kind = 2, commit_ack_kind = 3, completion_kind = 4, terminal_kind = 5, begin_kind = 6;
 static_assert(commit_wire_bytes <= max_control_bytes, "transaction certificate must fit one bounded control frame");
 static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559, "terminal logits require IEEE binary32");
 
@@ -188,6 +188,13 @@ terminal_wire encode_terminal_outcome(const terminal_outcome & outcome, const li
     return encoded.finish();
 }
 
+begin_wire encode_step_begin(const step_key & step, const limits & bounds) {
+    validate_step(step,bounds);
+    writer<begin_wire_bytes> encoded;
+    encoded.prefix(begin_kind); encoded.key(step);
+    return encoded.finish();
+}
+
 owner_receipt decode_applied_receipt(bytes_view payload, uint32_t authenticated_rank, const step_key & expected, const limits & bounds) {
     if (authenticated_rank > 2) { throw std::invalid_argument("invalid authenticated receipt rank"); }
     reader encoded(payload, receipt_wire_bytes, receipt_kind);
@@ -280,6 +287,19 @@ terminal_outcome decode_terminal_outcome(const header & authenticated, bytes_vie
         throw std::invalid_argument("terminal outcome differs from its pending key/certificate/sampling expectation");
     }
     return result;
+}
+
+step_key decode_step_begin(const header & authenticated, bytes_view payload, const begin_coordinates & expected, const limits & bounds) {
+    reader encoded(payload,begin_wire_bytes,begin_kind);
+    const auto step = encoded.key(); encoded.finish(); validate_step(step,bounds);
+    if (step.stamp.identity != expected.stamp.identity || step.stamp.session != expected.stamp.session ||
+            step.stamp.epoch != expected.stamp.epoch || step.stamp.generation != expected.stamp.generation ||
+            step.transaction != expected.transaction || step.chunk != expected.chunk || step.position != expected.position || step.rows != expected.rows) {
+        throw std::invalid_argument("BEGIN differs from locally expected owner state coordinates");
+    }
+    check_control(authenticated,kind::begin,payload,step);
+    if (authenticated.sender != 0) { throw std::invalid_argument("BEGIN requires coordinator A"); }
+    return step;
 }
 
 } // namespace glm_rpc

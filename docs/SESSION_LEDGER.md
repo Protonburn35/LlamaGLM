@@ -66,3 +66,5 @@ The actual process fixture now also recreates every context/ledger/reply cache a
 The fixture now also preserves a committed response row cursor while resetting/replaying the actual input/context cursor. A fixed hash journal verifies already globally completed rows and suppresses duplicate output appends across recovery after 1-row or 56-row prefixes. Production client/RNG history remains absent. See TRANSACTION_FIXTURE.md.
 
 A compact committed terminal outcome codec (kind 5, 272 bytes; envelope 16) now supports explicitly limited stateless greedy C-to-A results with exact raw FP32 candidates. It matches the full pending key/certificate and local vocabulary/count. Thirteen session suites pass, including independent golden bytes and malformed candidate/configuration refusal. See TERMINAL_RESULTS.md.
+
+A fixed BEGIN codec now establishes A's actual request hash while enforcing independently expected owner coordinates. B/C token plans are absent in the actual fixture. Fourteen session suites pass; BEGIN still does not authorize resource admission or bypass full-key duplicate checks. See REQUEST_BEGIN.md.

@@ -156,6 +156,21 @@ static void connect_controls(uint32_t rank, std::array<fixture_control, 3> & con
     }
 }
 
+static step_key agree_begin(uint32_t rank, const step_key & proposed, std::array<fixture_control,3> & controls,
+        const limits & bounds, bool committed_retry = false) {
+    if (!rank) {
+        const auto payload = encode_step_begin(proposed,bounds);
+        for (uint32_t remote : {1u,2u}) { send_control(controls[remote],proposed,kind::begin,0,remote,{payload.data(),payload.size()}); }
+        return proposed;
+    }
+    auto & link = controls[0];
+    const auto frame = read_frame(link.socket,*link.rx,shortly());
+    const begin_coordinates coordinates{proposed.stamp,proposed.transaction,proposed.chunk,proposed.position,proposed.rows};
+    const auto agreed = decode_step_begin(frame.metadata,{frame.payload.data(),frame.payload.size()},coordinates,bounds);
+    require(!committed_retry || agreed == proposed, "reconnected BEGIN changed the committed request key");
+    return agreed;
+}
+
 static terminal_outcome greedy_outcome(const reply_lease & reply, const commit_certificate & certificate, const limits & bounds) {
     const auto bytes = reply->payload();
     const auto & step = reply->receipt().step;
@@ -338,14 +353,16 @@ int main(int argc, char ** argv) {
                 requests.at("vocab") == 128 && requests.at("chunks") == expected_chunks &&
                 requests.at("layer_ends") == json(agreed.layer_ends) &&
                 requests.at("microbatch") == (streamed ? 1 : 32), "invalid fixture request schema/profile");
-        const auto & token_values = requests.at("tokens");
-        require(token_values.is_array() && token_values.size() == 131, "invalid fixture token count");
         std::vector<int32_t> tokens;
-        for (const auto & token : token_values) {
-            require(token.is_number_integer(), "fixture tokens must be integers");
-            if (token.is_number_unsigned()) { require(token.get<uint64_t>() < 128, "invalid fixture token ID"); }
-            else { require(token.get<int64_t>() >= 0 && token.get<int64_t>() < 128, "invalid fixture token ID"); }
-            tokens.push_back(token.get<int32_t>());
+        if (!transactional || rank == 0) {
+            const auto & token_values = requests.at("tokens");
+            require(token_values.is_array() && token_values.size() == 131, "invalid fixture token count");
+            for (const auto & token : token_values) {
+                require(token.is_number_integer(), "fixture tokens must be integers");
+                if (token.is_number_unsigned()) { require(token.get<uint64_t>() < 128, "invalid fixture token ID"); }
+                else { require(token.get<int64_t>() >= 0 && token.get<int64_t>() < 128, "invalid fixture token ID"); }
+                tokens.push_back(token.get<int32_t>());
+            }
         }
         const uint32_t byte_order = 1;
         require(*reinterpret_cast<const uint8_t *>(&byte_order) == 1, "fixture worker requires little-endian IEEE binary32");
@@ -520,9 +537,10 @@ int main(int argc, char ** argv) {
                 metadata.session[0] = 1; metadata.position = position;
                 metadata.rows = count; metadata.hidden = 128; metadata.streams = 4;
                 metadata.element = dtype::f32;
-                const step_key step{stamp,chunk+1,chunk+1,position,count,
-                    fingerprint_bytes(tokens.data() + position, count * sizeof(int32_t))};
+                step_key step{stamp,chunk+1,chunk+1,position,count,
+                    transactional && rank ? digest{} : fingerprint_bytes(tokens.data()+position,count*sizeof(int32_t))};
                 if (transactional) {
+                    step = agree_begin(rank,step,controls,bounds);
                     metadata.session = session; metadata.epoch = metadata.generation = generation; metadata.chunk = step.chunk;
                 }
                 common_batch batch(context.get());
@@ -578,6 +596,7 @@ int main(int argc, char ** argv) {
                         // All owners have a known complete first commit. Fresh control handshakes
                         // reset connection counters; semantic dedup and cached bytes must survive.
                         connect_controls(rank, controls, control_listener, psk, identity, bounds, control_ports);
+                        agree_begin(rank,step,controls,bounds,true);
                         auto duplicate = metadata;
                         auto repeated_input = step.request_digest;
                         if (rank) {

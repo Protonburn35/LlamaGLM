@@ -34,6 +34,8 @@ struct commit_certificate {
     std::array<owner_receipt, 3> owners{};
 };
 
+bool operator==(const step_key & a, const step_key & b);
+
 enum class owner_phase { empty, idle, running, applied, invalid };
 enum class step_disposition { execute, running, applied, committed };
 
@@ -75,5 +77,7 @@ private:
 // Checks exact A/B/C ownership, common coordinates, complete state positions and the
 // A output -> B input -> C input digest chain. Does not authenticate the receipts.
 void validate_commit(const commit_certificate & certificate, const limits & bounds);
+// Validates one applied receipt; adjacency and all-owner agreement require the certificate.
+void validate_receipt(const owner_receipt & receipt, const limits & bounds);
 
 } // namespace glm_rpc

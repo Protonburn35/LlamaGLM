@@ -1,4 +1,4 @@
-add_library(llama-glm-wire STATIC stage-crypto.cpp stage-wire.cpp stage-auth.cpp stage-net.cpp stage-identity.cpp stage-boundary.cpp stage-session.cpp)
+add_library(llama-glm-wire STATIC stage-crypto.cpp stage-wire.cpp stage-auth.cpp stage-net.cpp stage-identity.cpp stage-boundary.cpp stage-session.cpp stage-session-codec.cpp)
 target_include_directories(llama-glm-wire PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(llama-glm-wire PUBLIC cxx_std_17)
 set(LLAMA_GLM_SOURCE_REVISION "" CACHE STRING "Full Git revision for GLM RPC identity (for source archives without Git)")

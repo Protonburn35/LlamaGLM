@@ -113,3 +113,5 @@ Invalidation suppresses future getter access; callers must discard any previousl
 ## Owner transaction metadata component
 
 The new stage-session owner ledger checks semantic retries, contiguous positions, complete three-owner commit certificates and newer reset epochs. It retains only fixed-size metadata and does not decode peers, authenticate receipts, execute models or cache replies. A local commit is insufficient for client publication; all three commit acknowledgements and coordinated uncertain-state reset remain unimplemented. See SESSION_LEDGER.md.
+
+Transaction control now has checked fixed applied-receipt and complete-decision payloads; see SESSION_LEDGER.md for the exact fields. Authenticate each control frame before decoding. Control peers form A-B/A-C pairs, applied receipts address A, and decisions originate only from A. Activation data remains A-B-C. An applied STATE_ACK is distinct from a future certificate-bound commit acknowledgement. These components do not yet drive real graph transactions or authorize client publication.

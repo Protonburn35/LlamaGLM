@@ -25,6 +25,24 @@ Exact committed retries return the stored metadata without advancing position. T
 
 Conflicting valid retries invalidate the local epoch. Malformed/stale inputs rejected before mutation do not create a transaction. A failed commit certificate cannot advance local history. If commit acknowledgements are lost or any outcome is uncertain, a coordinator must stop work and invalidate every affected owner, including owners that already committed locally, then recreate contexts and use a newer epoch/generation before replay. No old-epoch result may be published or reused. Local commit is not global commit: client publication requires all three commit acknowledgements.
 
-No class instance can be copied. Storage is fixed-size metadata for one pending step and one previous three-owner certificate, independent of connection frame sequences. This is not a durable journal. Worker/coordinator restart and reconnect policy, rank-authenticated receipt collection, wire encoding, the global acknowledgement barrier, response cursor, terminal sampling/RNG and replay storage remain unimplemented. Prefix, snapshots and speculative rollback remain unsupported.
+No class instance can be copied. Storage is fixed-size metadata for one pending step and one previous three-owner certificate, independent of connection frame sequences. This is not a durable journal. Worker/coordinator restart and reconnect policy, rank-authenticated receipt collection, the global acknowledgement barrier, response cursor, terminal sampling/RNG and replay storage remain unimplemented. Prefix, snapshots and speculative rollback remain unsupported.
 
 The six component suites exercise retry states and expiry, malformed bounds/stamps/IDs, conflicting requests/results, missing/wrong owner and broken-chain certificates, a structurally valid certificate that contradicts actual local results, partial local commits followed by all-owner invalidation, strictly newer epochs and exact context capacity. These are metadata tests, not distributed model execution or production recovery evidence.
+
+## Fixed control payload encoding
+
+stage-session-codec uses explicit unsigned little-endian fields, not native structure layouts. Applied receipts are exactly 224 bytes; complete commit decisions are exactly 384 bytes. Unknown domains, versions, kinds, nonzero reserved fields, short/trailing bytes, malformed semantics, wrong expected owners and wrong locally pending keys refuse. Neither format is a global commit acknowledgement. A future commit acknowledgement needs its own distinct type and binding to the complete decision before a coordinator may publish output.
+
+| Region | Bytes | Fields |
+| --- | --- | --- |
+| Prefix | 16 | ASCII GLMTXN followed by two zero bytes; LE16 version 1, LE16 kind (1 applied receipt, 2 commit decision), LE32 reserved zero |
+| Common key | 128 | identity 32 bytes; session 16 bytes; LE64 epoch, generation, transaction, chunk, position; LE32 rows/reserved zero; request fingerprint 32 bytes |
+| Owner facts | 80 each | LE32 rank/reserved zero; LE64 end position; input/output fingerprints 32 bytes each |
+
+A receipt has one owner-facts record; a decision has exactly three in A/B/C order. All fingerprints are raw bytes. Common keys are stored once on the wire and copied into the checked local receipts. Integers above 32 bits are covered by independent Python struct.pack/hashlib golden vectors.
+
+Authenticate the enclosing control frame before decoding. decode_applied_ack and decode_commit_decision additionally correlate its type, authenticated sender/receiver roles, session/epoch/generation, transaction/chunk/position, empty control tensor shape, fragment/count/length facts and nonzero verified sequence with the locally pending step. Control connections form A-B and A-C pairs: applied receipts go to A, and only A sends commit decisions to B/C. The activation data path remains A-B-C. The decoded receipt rank must match its authenticated sender; C cannot issue a commit decision to B. An applied STATE_ACK is never a commit decision or proof of global commitment.
+
+The low-level bare-payload decoders perform structural validation and expected-key/rank checks; they do not authenticate a frame. The future dispatcher must compute fingerprints over canonical unfragmented payload bytes, excluding connection/fragment headers, so retries across fresh connections remain comparable. Model execution, receipt collection and global publication remain separate integration work.
+
+The target now has nine suites: the six lifecycle cases plus independent golden bytes, exhaustive short lengths/reserved/key/chain refusal and 2,000 deterministic mutated payloads, and authenticated control-envelope/body correlation. Changing only C's output can remain structurally valid, so the authentication test requires MAC rejection before decoding and permanent receiver poisoning. AddressSanitizer/UndefinedBehaviorSanitizer passes the standalone suite with no report. These are component tests, not live distributed transactions.

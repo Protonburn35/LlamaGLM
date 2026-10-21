@@ -47,14 +47,26 @@ void check_key(const step_key & step, const limits & bounds) {
 
 } // namespace
 
+bool operator==(const step_key & a, const step_key & b) { return same(a, b); }
+
+void validate_receipt(const owner_receipt & receipt, const limits & bounds) {
+    bounds.validate();
+    check_key(receipt.step, bounds);
+    if (receipt.rank > 2 || receipt.end_position != receipt.step.position + receipt.step.rows ||
+            !nonzero(receipt.input_digest) || !nonzero(receipt.output_digest) ||
+            (receipt.rank == 0 && receipt.input_digest != receipt.step.request_digest)) {
+        throw std::invalid_argument("invalid owner applied-state receipt");
+    }
+}
+
 void validate_commit(const commit_certificate & certificate, const limits & bounds) {
     bounds.validate();
     const auto & step = certificate.owners[0].step;
     check_key(step, bounds);
     for (uint32_t rank = 0; rank < 3; ++rank) {
         const auto & receipt = certificate.owners[rank];
-        if (receipt.rank != rank || !same(receipt.step, step) || receipt.end_position != step.position + step.rows ||
-                !nonzero(receipt.input_digest) || !nonzero(receipt.output_digest)) {
+        validate_receipt(receipt, bounds);
+        if (receipt.rank != rank || !same(receipt.step, step)) {
             throw std::invalid_argument("commit requires complete matching A/B/C owner receipts");
         }
         const auto & expected = rank ? certificate.owners[rank-1].output_digest : step.request_digest;

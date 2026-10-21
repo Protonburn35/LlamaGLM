@@ -1,0 +1,152 @@
+#include "stage-session-codec.h"
+
+#include <algorithm>
+#include <stdexcept>
+
+namespace glm_rpc {
+namespace {
+
+constexpr std::array<uint8_t, 8> magic{'G','L','M','T','X','N',0,0};
+constexpr uint16_t format_version = 1, receipt_kind = 1, commit_kind = 2;
+static_assert(commit_wire_bytes <= max_control_bytes, "transaction certificate must fit one bounded control frame");
+
+template<size_t N> struct writer {
+    std::array<uint8_t, N> output{};
+    size_t offset = 0;
+    void room(size_t count) const {
+        if (offset > N || count > N - offset) { throw std::logic_error("session encoder capacity exceeded"); }
+    }
+    void integer(uint64_t value, size_t bytes) {
+        if (bytes > 8) { throw std::logic_error("session integer width exceeded"); }
+        room(bytes);
+        for (size_t i = 0; i < bytes; ++i) { output[offset++] = uint8_t(value); value >>= 8; }
+    }
+    template<size_t M> void block(const std::array<uint8_t, M> & value) {
+        room(M); std::copy(value.begin(), value.end(), output.begin() + offset); offset += M;
+    }
+    void prefix(uint16_t kind) { block(magic); integer(format_version, 2); integer(kind, 2); integer(0, 4); }
+    void key(const step_key & value) {
+        block(value.stamp.identity); block(value.stamp.session);
+        integer(value.stamp.epoch, 8); integer(value.stamp.generation, 8);
+        integer(value.transaction, 8); integer(value.chunk, 8); integer(value.position, 8);
+        integer(value.rows, 4); integer(0, 4); block(value.request_digest);
+    }
+    void owner(const owner_receipt & value) {
+        integer(value.rank, 4); integer(0, 4); integer(value.end_position, 8);
+        block(value.input_digest); block(value.output_digest);
+    }
+    std::array<uint8_t, N> finish() {
+        if (offset != N) { throw std::logic_error("session encoder length differs"); }
+        return output;
+    }
+};
+
+struct reader {
+    bytes_view input;
+    size_t offset = 0;
+    reader(bytes_view payload, size_t bytes, uint16_t kind) : input(payload) {
+        if (!input.data || input.size != bytes) { throw std::invalid_argument("session payload requires its exact fixed length"); }
+        std::array<uint8_t, 8> domain{}; block(domain);
+        if (domain != magic || integer(2) != format_version || integer(2) != kind) {
+            throw std::invalid_argument("unknown session payload domain/version/kind");
+        }
+        reserved();
+    }
+    void room(size_t count) const {
+        if (offset > input.size || count > input.size - offset) { throw std::invalid_argument("truncated session payload"); }
+    }
+    uint64_t integer(size_t bytes) {
+        if (bytes > 8) { throw std::invalid_argument("session integer width exceeded"); }
+        room(bytes);
+        uint64_t result = 0;
+        for (size_t i = 0; i < bytes; ++i) { result |= uint64_t(input.data[offset++]) << (8 * i); }
+        return result;
+    }
+    template<size_t N> void block(std::array<uint8_t, N> & value) {
+        room(N); std::copy_n(input.data + offset, N, value.begin()); offset += N;
+    }
+    void reserved() { if (integer(4) != 0) { throw std::invalid_argument("nonzero reserved session field"); } }
+    step_key key() {
+        step_key result;
+        block(result.stamp.identity); block(result.stamp.session);
+        result.stamp.epoch = integer(8); result.stamp.generation = integer(8);
+        result.transaction = integer(8); result.chunk = integer(8); result.position = integer(8);
+        result.rows = uint32_t(integer(4)); reserved(); block(result.request_digest);
+        return result;
+    }
+    owner_receipt owner(const step_key & key) {
+        owner_receipt result; result.step = key;
+        result.rank = uint32_t(integer(4)); reserved(); result.end_position = integer(8);
+        block(result.input_digest); block(result.output_digest);
+        return result;
+    }
+    void finish() const {
+        if (offset != input.size) { throw std::invalid_argument("trailing session payload bytes"); }
+    }
+};
+
+void check_control(const header & envelope, kind type, bytes_view payload, const step_key & expected) {
+    if (envelope.type != type || envelope.sender > 2 || envelope.receiver > 2 || envelope.sender == envelope.receiver ||
+            envelope.session != expected.stamp.session || envelope.epoch != expected.stamp.epoch ||
+            envelope.generation != expected.stamp.generation || envelope.transaction != expected.transaction ||
+            envelope.chunk != expected.chunk || envelope.position != expected.position || envelope.rows || envelope.hidden ||
+            envelope.streams || envelope.element != dtype::none || envelope.fragment || envelope.fragments != 1 ||
+            envelope.payload_bytes != payload.size || envelope.total_bytes != payload.size || envelope.sequence == 0) {
+        throw std::invalid_argument("session control envelope differs from its pending transaction/body");
+    }
+}
+
+} // namespace
+
+receipt_wire encode_applied_receipt(const owner_receipt & receipt, const limits & bounds) {
+    validate_receipt(receipt, bounds);
+    writer<receipt_wire_bytes> encoded;
+    encoded.prefix(receipt_kind); encoded.key(receipt.step); encoded.owner(receipt);
+    return encoded.finish();
+}
+
+commit_wire encode_commit_certificate(const commit_certificate & certificate, const limits & bounds) {
+    validate_commit(certificate, bounds);
+    writer<commit_wire_bytes> encoded;
+    encoded.prefix(commit_kind); encoded.key(certificate.owners[0].step);
+    for (const auto & owner : certificate.owners) { encoded.owner(owner); }
+    return encoded.finish();
+}
+
+owner_receipt decode_applied_receipt(bytes_view payload, uint32_t authenticated_rank, const step_key & expected, const limits & bounds) {
+    if (authenticated_rank > 2) { throw std::invalid_argument("invalid authenticated receipt rank"); }
+    reader encoded(payload, receipt_wire_bytes, receipt_kind);
+    const auto key = encoded.key();
+    const auto receipt = encoded.owner(key);
+    encoded.finish();
+    validate_receipt(receipt, bounds);
+    if (receipt.rank != authenticated_rank || !(key == expected)) {
+        throw std::invalid_argument("receipt does not match the authenticated owner and pending transaction");
+    }
+    return receipt;
+}
+
+commit_certificate decode_commit_certificate(bytes_view payload, const step_key & expected, const limits & bounds) {
+    reader encoded(payload, commit_wire_bytes, commit_kind);
+    const auto key = encoded.key();
+    commit_certificate certificate;
+    for (auto & owner : certificate.owners) { owner = encoded.owner(key); }
+    encoded.finish();
+    validate_commit(certificate, bounds);
+    if (!(key == expected)) { throw std::invalid_argument("commit does not match the pending transaction"); }
+    return certificate;
+}
+
+owner_receipt decode_applied_ack(const header & authenticated, bytes_view payload, const step_key & expected, const limits & bounds) {
+    check_control(authenticated, kind::state_ack, payload, expected);
+    if (authenticated.receiver != 0) { throw std::invalid_argument("applied acknowledgement requires coordinator A"); }
+    return decode_applied_receipt(payload, authenticated.sender, expected, bounds);
+}
+
+commit_certificate decode_commit_decision(const header & authenticated, bytes_view payload, const step_key & expected, const limits & bounds) {
+    check_control(authenticated, kind::commit, payload, expected);
+    if (authenticated.sender != 0) { throw std::invalid_argument("commit decision requires coordinator A"); }
+    return decode_commit_certificate(payload, expected, bounds);
+}
+
+} // namespace glm_rpc

@@ -1,5 +1,7 @@
 #include "stage-session.h"
+#include "stage-session-codec.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
 #include <stdexcept>
@@ -253,10 +255,173 @@ static void reset_and_capacity() {
     require(owner.phase() == owner_phase::idle && owner.committed_position() == 1, "context overflow changed committed history");
 }
 
+static commit_certificate codec_fixture() {
+    step_key key;
+    for (size_t i = 0; i < 32; ++i) { key.stamp.identity[i] = uint8_t(i); key.request_digest[i] = uint8_t(0x20 + i); }
+    for (size_t i = 0; i < 16; ++i) { key.stamp.session[i] = uint8_t(0xa0 + i); }
+    key.stamp.epoch = 0x0102030405060708ull; key.stamp.generation = 0x1112131415161718ull;
+    key.transaction = 0x2122232425262728ull; key.chunk = 0x3132333435363738ull;
+    key.position = 17; key.rows = 4;
+    commit_certificate result;
+    for (uint32_t rank = 0; rank < 3; ++rank) {
+        auto & receipt = result.owners[rank];
+        receipt.step = key; receipt.rank = rank; receipt.end_position = 21;
+        receipt.input_digest = rank ? result.owners[rank-1].output_digest : key.request_digest;
+        for (size_t i = 0; i < 32; ++i) { receipt.output_digest[i] = uint8_t(0x40 + rank * 32 + i); }
+    }
+    return result;
+}
+
+static std::string hex(const digest & value) {
+    const char * digits = "0123456789abcdef";
+    std::string result;
+    for (const auto byte : value) { result.push_back(digits[byte >> 4]); result.push_back(digits[byte & 15]); }
+    return result;
+}
+
+static void codec_golden() {
+    const auto fixture = codec_fixture();
+    const auto bounds = small_bounds();
+    const auto receipt = encode_applied_receipt(fixture.owners[1], bounds);
+    const auto certificate = encode_commit_certificate(fixture, bounds);
+    // Independent Python struct.pack('<...') + hashlib vectors, including integers above 32 bits.
+    require(hex(sha256({{receipt.data(), receipt.size()}})) == "e1339b7559be2f1760dd72ceb9f4d0a5f06e204ac053c8a6310fe04222b96d75" &&
+            hex(sha256({{certificate.data(), certificate.size()}})) == "baa3e6661fc8dd4ea41d4c558c72d1620d841aa4b1ee217e2d77475676f05544",
+            "session codec differs from independent little-endian golden vectors");
+    const auto decoded = decode_applied_receipt({receipt.data(), receipt.size()}, 1, fixture.owners[1].step, bounds);
+    require(decoded.step == fixture.owners[1].step && decoded.rank == 1 && decoded.end_position == 21 &&
+            decoded.input_digest == fixture.owners[1].input_digest && decoded.output_digest == fixture.owners[1].output_digest,
+            "owner receipt round trip changed semantic fields");
+    const auto committed = decode_commit_certificate({certificate.data(), certificate.size()}, fixture.owners[0].step, bounds);
+    require(encode_commit_certificate(committed, bounds) == certificate, "complete commit certificate round trip differs");
+}
+
+static void codec_refusals() {
+    const auto fixture = codec_fixture();
+    const auto bounds = small_bounds();
+    const auto & expected = fixture.owners[0].step;
+    const auto receipt = encode_applied_receipt(fixture.owners[1], bounds);
+    const auto certificate = encode_commit_certificate(fixture, bounds);
+    refused([&] { decode_applied_receipt({nullptr, receipt.size()}, 1, expected, bounds); });
+    refused([&] { decode_commit_certificate({nullptr, certificate.size()}, expected, bounds); });
+    for (size_t size = 0; size < receipt.size(); ++size) {
+        refused([&] { decode_applied_receipt({receipt.data(), size}, 1, expected, bounds); });
+    }
+    for (size_t size = 0; size < certificate.size(); ++size) {
+        refused([&] { decode_commit_certificate({certificate.data(), size}, expected, bounds); });
+    }
+    refused([&] { decode_applied_receipt({receipt.data(), receipt.size() + 1}, 1, expected, bounds); });
+    refused([&] { decode_commit_certificate({certificate.data(), certificate.size() + 1}, expected, bounds); });
+    refused([&] { decode_applied_receipt({receipt.data(), receipt.size()}, 0, expected, bounds); });
+    refused([&] { decode_applied_receipt({receipt.data(), receipt.size()}, 3, expected, bounds); });
+    for (const size_t offset : {size_t(0), size_t(8), size_t(10), size_t(12), size_t(16), size_t(48),
+            size_t(64), size_t(72), size_t(80), size_t(88), size_t(96), size_t(104), size_t(108), size_t(112),
+            size_t(144), size_t(148), size_t(152)}) {
+        auto changed = receipt; changed[offset] ^= 0x80;
+        refused([&] { decode_applied_receipt({changed.data(), changed.size()}, 1, expected, bounds); });
+    }
+    for (const size_t offset : {size_t(0), size_t(8), size_t(10), size_t(12), size_t(16), size_t(48),
+            size_t(64), size_t(72), size_t(80), size_t(88), size_t(96), size_t(104), size_t(108), size_t(112),
+            size_t(144), size_t(148), size_t(152), size_t(160), size_t(192), size_t(224), size_t(228),
+            size_t(232), size_t(240), size_t(272), size_t(304), size_t(308), size_t(312), size_t(320)}) {
+        auto changed = certificate; changed[offset] ^= 0x80;
+        refused([&] { decode_commit_certificate({changed.data(), changed.size()}, expected, bounds); });
+    }
+    auto wrong_key = expected; ++wrong_key.stamp.epoch;
+    refused([&] { decode_commit_certificate({certificate.data(), certificate.size()}, wrong_key, bounds); });
+    refused([&] { encode_applied_receipt({}, bounds); });
+    auto missing = fixture; missing.owners[1] = {};
+    refused([&] { encode_commit_certificate(missing, bounds); });
+    uint32_t random = 53;
+    for (size_t iteration = 0; iteration < 2000; ++iteration) {
+        auto changed = certificate;
+        for (size_t byte = 0; byte <= iteration % 8; ++byte) {
+            random ^= random << 13; random ^= random >> 17; random ^= random << 5;
+            changed[random % changed.size()] ^= uint8_t((random >> 16) | 1);
+        }
+        try {
+            const auto parsed = decode_commit_certificate({changed.data(), changed.size()}, expected, bounds);
+            require(encode_commit_certificate(parsed, bounds) == changed, "accepted session payload has ignored/noncanonical bytes");
+        } catch (const std::invalid_argument &) {}
+    }
+}
+
+static void authenticated_certificate() {
+    const auto certificate = codec_fixture();
+    const auto & expected = certificate.owners[0].step;
+    const auto bounds = small_bounds();
+    const auto payload = encode_commit_certificate(certificate, bounds);
+    auto psk = random_nonce();
+    binding peer{random_nonce(), random_nonce(), expected.stamp.identity, 0, 1, channel::control};
+    auto key = derive_link_key(psk, peer); erase_secret(psk);
+    sender tx(key, peer, bounds);
+    receiver good(key, peer, bounds), damaged(key, peer, bounds);
+    header metadata;
+    metadata.type = kind::commit; metadata.session = expected.stamp.session;
+    metadata.epoch = expected.stamp.epoch; metadata.generation = expected.stamp.generation;
+    metadata.transaction = expected.transaction; metadata.chunk = expected.chunk;
+    metadata.position = expected.position;
+    metadata.payload_bytes = uint32_t(payload.size()); metadata.total_bytes = payload.size();
+    auto packet = tx.encode(metadata, {payload.data(), payload.size()});
+    wire_header raw{}; std::copy_n(packet.begin(), raw.size(), raw.begin());
+    const auto inspected = good.authenticate(raw, {packet.data() + raw.size(), payload.size()});
+    require(inspected.type == kind::commit && encode_commit_certificate(decode_commit_decision(inspected,
+            {packet.data() + raw.size(), payload.size()}, expected, bounds), bounds) == payload,
+            "authenticated control frame changed its commit certificate");
+    for (int field = 0; field < 19; ++field) {
+        auto changed = inspected;
+        if (field == 0) { changed.type = kind::state_ack; }
+        if (field == 1) { changed.sender = 3; }
+        if (field == 2) { changed.receiver = changed.sender; }
+        if (field == 3) { changed.session[0] ^= 1; }
+        if (field == 4) { ++changed.epoch; }
+        if (field == 5) { ++changed.generation; }
+        if (field == 6) { ++changed.transaction; }
+        if (field == 7) { ++changed.chunk; }
+        if (field == 8) { ++changed.position; }
+        if (field == 9) { changed.rows = 1; }
+        if (field == 10) { changed.hidden = 128; }
+        if (field == 11) { changed.streams = 4; }
+        if (field == 12) { changed.element = dtype::f32; }
+        if (field == 13) { changed.fragment = 1; }
+        if (field == 14) { changed.fragments = 2; }
+        if (field == 15) { ++changed.payload_bytes; }
+        if (field == 16) { ++changed.total_bytes; }
+        if (field == 17) { changed.sequence = 0; }
+        if (field == 18) { changed.sender = 2; }
+        refused([&] { decode_commit_decision(changed, {payload.data(), payload.size()}, expected, bounds); });
+    }
+    const auto applied = encode_applied_receipt(certificate.owners[1], bounds);
+    auto acknowledgement = inspected; acknowledgement.type = kind::state_ack; acknowledgement.sender = 1; acknowledgement.receiver = 0;
+    acknowledgement.payload_bytes = uint32_t(applied.size()); acknowledgement.total_bytes = applied.size();
+    require(decode_applied_ack(acknowledgement, {applied.data(), applied.size()}, expected, bounds).rank == 1,
+            "applied acknowledgement lost its authenticated owner");
+    auto wrong_receiver = acknowledgement; wrong_receiver.receiver = 2;
+    refused([&] { decode_applied_ack(wrong_receiver, {applied.data(), applied.size()}, expected, bounds); });
+    const auto terminal = encode_applied_receipt(certificate.owners[2], bounds);
+    auto from_c = acknowledgement; from_c.sender = 2;
+    require(decode_applied_ack(from_c, {terminal.data(), terminal.size()}, expected, bounds).rank == 2,
+            "terminal applied acknowledgement did not reach coordinator A");
+    acknowledgement.type = kind::commit;
+    refused([&] { decode_applied_ack(acknowledgement, {applied.data(), applied.size()}, expected, bounds); });
+    // Changing only C's output remains structurally possible; MAC verification must precede decoding.
+    packet.back() ^= 1;
+    bool decoded = false;
+    refused([&] {
+        damaged.authenticate(raw, {packet.data() + raw.size(), payload.size()});
+        decode_commit_decision(inspected, {packet.data() + raw.size(), payload.size()}, expected, bounds);
+        decoded = true;
+    });
+    require(!decoded, "unauthenticated certificate reached its decoder");
+    refused([&] { damaged.authenticate(raw, {payload.data(), payload.size()}); });
+    erase_secret(key);
+}
+
 int main() {
     try {
         happy_and_expired(); malformed_requests(); conflicts(); certificate_barrier(); uncertain_reset(); reset_and_capacity();
-        std::puts("GLM session ledger: six suites passed (retry states, bounds, conflicts, A/B/C certificates, uncertain reset, epochs/capacity); metadata component only, global commit/transport/model integration NOT_IMPLEMENTED");
+        codec_golden(); codec_refusals(); authenticated_certificate();
+        std::puts("GLM session ledger: nine suites passed (retry states, bounds, conflicts, A/B/C certificates, uncertain reset, epochs/capacity, independent codec vectors, malformed payloads, authenticated control); global commit/model dispatch NOT_IMPLEMENTED");
         return 0;
     } catch (const std::exception & error) {
         std::fprintf(stderr, "GLM session ledger test failed: %s\n", error.what()); return 1;

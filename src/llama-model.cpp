@@ -1744,6 +1744,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     pimpl->dev_output = get_layer_buft_list(n_layer_all);
 
     if (stage_streamed) { stage_source = llama_stage_make_weight_source(*this, stage_storage); }
+    if (stage_preloaded) { stage_source = llama_stage_make_preloaded_source(*this, stage_preload); }
 
     const auto TENSOR_NOT_REQUIRED = llama_model_loader::TENSOR_NOT_REQUIRED;
 

@@ -4510,8 +4510,8 @@ int32_t llama_set_adapters_lora(
             llama_adapter_lora ** adapters,
             size_t n_adapters,
             float * scales) {
-    if (ctx->get_model().stage_streamed && n_adapters != 0) {
-        LLAMA_LOG_ERROR("%s: LoRA is not supported by streamed stages\n", __func__);
+    if (ctx->get_model().stage_source && n_adapters != 0) {
+        LLAMA_LOG_ERROR("%s: LoRA is not supported by banked stage experts\n", __func__);
         return -1;
     }
     if (adapters == nullptr || scales == nullptr) {

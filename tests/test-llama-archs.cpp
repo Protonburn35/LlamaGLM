@@ -33,6 +33,12 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32) && defined(LLAMA_GLM_STAGE_STORAGE)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 static bool arch_matches(const std::string & filter, llm_arch arch) {
     if (filter.empty()) {
         return true;
@@ -675,7 +681,7 @@ static void test_owned_stage_forward(llama_model * reference, const std::array<l
     if (params.n_ctx != 0) { throw std::runtime_error("stage defaults silently shorten the context"); }
     params.n_batch = 64;
     params.n_ubatch = microbatch;
-    if (models[0]->stage_streamed || models[2]->stage_streamed) { params.op_offload = false; }
+    for (const auto & model : models) { if (model->stage_source) { params.op_offload = false; } }
     params.n_threads = params.n_threads_batch = 4;
     stage_boundaries boundaries;
     for (size_t rank = 0; rank < 2; ++rank) {
@@ -971,6 +977,69 @@ static void test_stage_schema(const std::filesystem::path & path, uint64_t expec
 }
 
 #ifdef LLAMA_GLM_STAGE_STORAGE
+struct fixture_lock_quota {
+#ifdef _WIN32
+    SIZE_T minimum = 0, maximum = 0;
+    DWORD flags = 0;
+    fixture_lock_quota() {
+        if (!GetProcessWorkingSetSizeEx(GetCurrentProcess(), &minimum, &maximum, &flags) ||
+                !SetProcessWorkingSetSizeEx(GetCurrentProcess(), std::max<SIZE_T>(minimum, 16u << 20), std::max<SIZE_T>(maximum, 64u << 20), flags)) {
+            throw std::runtime_error("cannot reserve the test process working-set quota for locked expert qualification");
+        }
+    }
+    ~fixture_lock_quota() { SetProcessWorkingSetSizeEx(GetCurrentProcess(), minimum, maximum, flags); }
+#endif
+};
+
+static void test_preloaded_stage_models(const std::filesystem::path & path, llama_model * reference,
+        llama_model_params params, size_t seed) {
+    [[maybe_unused]] fixture_lock_quota quota;
+    const llama_stage_preload_params preload{1,8,6u<<20,6u<<20,8u<<20,64,0};
+    const auto middle_path = path.parent_path() / "preloaded middle.gguf";
+    if (!std::filesystem::copy_file(path, middle_path)) { throw std::runtime_error("cannot write isolated preload model fixture"); }
+    std::array<llama_model_ptr, 3> models;
+    for (uint32_t rank = 0; rank < 3; ++rank) {
+        const llama_stage_model_params stage{1,rank,{2,3,6}};
+        models[rank].reset(rank == 1 ? llama_model_load_stage_preloaded_from_file(middle_path.string().c_str(), params, stage, preload) :
+            llama_model_load_stage_from_file(path.string().c_str(), params, stage));
+        if (!models[rank]) { throw std::runtime_error("locked-expert stage model failed to load"); }
+    }
+    llama_stage_preload_report startup{}; startup.version = 1;
+    uint64_t routed = 0;
+    for (const auto & tensor : models[1]->tensors_by_name) {
+        if (tensor.first.find("_exps.weight") != std::string::npos) {
+            if (tensor.second->data || tensor.second->buffer) { throw std::runtime_error("preloaded middle stage duplicated full expert GGML tensors"); }
+            routed += ggml_nbytes(tensor.second);
+        } else if (!tensor.second->data) { throw std::runtime_error("preloaded middle stage omitted an ordinary owned weight"); }
+    }
+    if (!llama_model_stage_preload_report(models[1].get(), &startup) || startup.expert_slabs != 48 ||
+            startup.open_source_files || startup.full_residency_validated || startup.payload_bytes != routed ||
+            startup.locked_bytes < routed || startup.locked_bytes > preload.host_page_bytes ||
+            startup.startup_read_requests != 48 || startup.startup_read_bytes != routed) {
+        throw std::runtime_error("preloaded source did not lock/read the complete catalog or incorrectly claimed full admission");
+    }
+    for (auto bad : std::vector<llama_stage_preload_params>{
+            {2,8,6u<<20,6u<<20,8u<<20,64,0}, {1,7,6u<<20,6u<<20,8u<<20,64,0},
+            {1,8,1,6u<<20,8u<<20,64,0}, {1,8,6u<<20,1,8u<<20,64,0},
+            {1,8,6u<<20,6u<<20,8u<<20,47,0}, {1,8,6u<<20,6u<<20,8u<<20,64,1}}) {
+        llama_model_ptr rejected(llama_model_load_stage_preloaded_from_file(path.string().c_str(), params, {1,1,{2,3,6}}, bad));
+        if (rejected) { throw std::runtime_error("preloaded source admitted incomplete catalog/budgets or invalid policy"); }
+    }
+    llama_model_ptr wrong_rank(llama_model_load_stage_preloaded_from_file(path.string().c_str(), params, {1,0,{2,3,6}}, preload));
+    if (wrong_rank) { throw std::runtime_error("locked middle-stage API admitted a desktop rank"); }
+    if (!std::filesystem::remove(middle_path)) { throw std::runtime_error("preloaded model retained a source file handle"); }
+    const auto defaults = llama_stage_context_default_params_for_model(models[1].get());
+    if (defaults.n_ctx != 0 || defaults.n_ubatch != 1 || defaults.op_offload) { throw std::runtime_error("preloaded bank defaults changed context/copy policy"); }
+    test_owned_stage_forward(reference, models, seed, 1);
+    llama_stage_preload_report after{}; after.version = 1;
+    if (!llama_model_stage_preload_report(models[1].get(), &after) || after.open_source_files || after.full_residency_validated ||
+            after.startup_read_requests != startup.startup_read_requests || after.startup_read_bytes != startup.startup_read_bytes ||
+            after.payload_bytes != startup.payload_bytes || after.locked_bytes != startup.locked_bytes) {
+        throw std::runtime_error("middle expert source changed or performed inference file reads after preload");
+    }
+    LOG("Stage preloaded: middle experts locked, all 48 slabs read at startup, file removed before 131-token oracle comparison; full model/state/GPU admission NOT_VALIDATED\n");
+}
+
 static void test_streamed_callback_failure(llama_model * model) {
     ggml_backend_ptr backend(ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr));
     if (!backend) { throw std::runtime_error("cannot initialize streamed callback test backend"); }
@@ -1173,6 +1242,7 @@ static void test_owned_stage_loading(const size_t seed, const float stdev) {
     params.lazy_mode = LLAMA_LAZY_MODE_OFF;
 #ifdef LLAMA_GLM_STAGE_STORAGE
     test_streamed_stage_models(path, reference.get(), params, seed);
+    test_preloaded_stage_models(path, reference.get(), params, seed);
 #endif
     if (!std::filesystem::remove(path)) { throw std::runtime_error("stage fixture file remained open after loading"); }
     LOG("Stage-owned loading: three ranks, provider/file bytes, invalid plans and monolithic refusal passed\n");
@@ -1651,7 +1721,7 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
                 test_owned_stage_loading(seed, stdev);
                 n_tests += 3;
 #ifdef LLAMA_GLM_STAGE_STORAGE
-                ++n_tests;
+                n_tests += 2;
 #endif
             }
             std::pair<llama_model_ptr, llama_context_ptr> model_and_ctx_cpu;

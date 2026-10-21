@@ -53,6 +53,29 @@ struct llama_stage_bank_report {
 // Backend slot/copy counters, not physical GPU residency or admission.
 LLAMA_API bool llama_context_stage_bank_report(const struct llama_context * ctx, struct llama_stage_bank_report * report);
 
+struct llama_stage_preload_params {
+    uint32_t version; // must be 1
+    uint32_t bank_slots;
+    uint64_t host_payload_bytes;
+    uint64_t host_page_bytes;
+    uint64_t context_bank_bytes;
+    uint32_t host_entries; // 1..100000, complete owned routed catalog
+    uint32_t reserved;     // must be 0
+};
+
+struct llama_stage_preload_report {
+    uint32_t version; // caller initializes to 1
+    uint32_t expert_slabs;
+    uint32_t open_source_files;
+    uint32_t full_residency_validated; // remains 0: other weights/state/GPU admission is separate
+    uint64_t payload_bytes;
+    uint64_t locked_bytes;
+    uint64_t startup_read_requests;
+    uint64_t startup_read_bytes;
+};
+
+LLAMA_API bool llama_model_stage_preload_report(const struct llama_model * model, struct llama_stage_preload_report * report);
+
 struct llama_stage_schema_report {
     uint32_t version; // caller must initialize to 1
     uint32_t tensors;
@@ -83,6 +106,14 @@ LLAMA_API struct llama_model * llama_model_load_stage_streamed_from_file(
         struct llama_model_params params,
         struct llama_stage_model_params stage,
         struct llama_stage_storage_params storage);
+
+// Experimental rank 1: preload every owned routed expert into locked host pages and close its readers.
+// Ordinary dense/shared weights load normally. This alone does not establish complete laptop admission.
+LLAMA_API struct llama_model * llama_model_load_stage_preloaded_from_file(
+        const char * path_model,
+        struct llama_model_params params,
+        struct llama_stage_model_params stage,
+        struct llama_stage_preload_params preload);
 
 // Synthetic/custom tensor source equivalent, used for owned-weight qualification.
 LLAMA_API struct llama_model * llama_model_init_stage_from_user(

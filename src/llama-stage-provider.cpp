@@ -25,12 +25,87 @@ int llama_stage_expert_projection(const LLM_TN_IMPL & name) {
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <set>
 
 namespace {
 
 struct stage_layer_source {
     std::array<ggml_tensor *, 3> logical{};
     std::array<glm_stage::expert_projection, 3> specs{};
+};
+
+struct stage_expert_reader {
+    virtual ~stage_expert_reader() = default;
+    virtual glm_stage::expert_lease acquire(glm_stage::expert_address address) = 0;
+    virtual void report(llama_stage_storage_report & output) const = 0;
+    virtual bool report_preload(llama_stage_preload_report &) const { return false; }
+};
+
+struct desktop_reader final : stage_expert_reader {
+    std::vector<std::shared_ptr<glm_stage::expert_file>> files;
+    std::shared_ptr<glm_stage::desktop_experts> cache;
+    desktop_reader(uint32_t rank, std::vector<std::shared_ptr<glm_stage::expert_file>> sources,
+            const std::vector<glm_stage::expert_address> & catalog, const llama_stage_storage_params & params) : files(std::move(sources)) {
+        cache = std::make_shared<glm_stage::desktop_experts>(rank, files, catalog,
+            params.host_cache_bytes, params.host_cache_entries, params.max_active_reads);
+    }
+    glm_stage::expert_lease acquire(glm_stage::expert_address address) override { return cache->acquire(address); }
+    void report(llama_stage_storage_report & output) const override {
+        output.host_reserved_bytes = cache->stats().reserved_payload_bytes;
+        for (const auto & file : files) {
+            const auto stats = file->stats();
+            output.native_read_requests += stats.requests;
+            output.native_system_reads += stats.system_reads;
+            output.native_read_bytes += stats.bytes;
+        }
+    }
+};
+
+// Only immutable memory and startup counters survive construction. No file/callback fallback exists.
+struct preloaded_reader final : stage_expert_reader {
+    std::shared_ptr<glm_stage::memory_experts> memory;
+    glm_stage::file_read_stats startup{};
+    llama_stage_preload_report snapshot{};
+    preloaded_reader(std::vector<std::shared_ptr<glm_stage::expert_file>> files,
+            const std::vector<glm_stage::expert_address> & catalog, const llama_stage_storage_params & params, uint64_t page_budget) {
+        const std::set<glm_stage::expert_address> unique(catalog.begin(), catalog.end());
+        if (unique.size() != catalog.size() || catalog.size() > params.host_cache_entries) {
+            throw std::invalid_argument("complete locked expert catalog exceeds entry budget or contains duplicates");
+        }
+        uint64_t payload = 0, pages = 0, end = 0;
+        uint32_t previous_file = UINT32_MAX;
+        for (const auto & address : unique) {
+            if (address.file >= files.size() || address.bytes == 0 || address.bytes > glm_stage::max_expert_read_bytes ||
+                    address.offset > files[address.file]->size() || address.bytes > files[address.file]->size() - address.offset ||
+                    (address.file == previous_file && address.offset < end) || address.bytes > params.host_cache_bytes - payload) {
+                throw std::invalid_argument("locked expert catalog is overlapping, out of bounds or exceeds payload capacity");
+            }
+            const uint64_t rounded = glm_stage::expert_buffer::required_locked_bytes(size_t(address.bytes));
+            if (rounded > page_budget - pages) { throw std::invalid_argument("complete expert catalog exceeds native page-lock budget"); }
+            payload += address.bytes; pages += rounded;
+            previous_file = address.file; end = address.offset + address.bytes;
+        }
+        memory = std::make_shared<glm_stage::memory_experts>(params.host_cache_bytes, params.host_cache_entries, page_budget);
+        for (const auto & address : catalog) {
+            const auto file = files[address.file];
+            memory->preload_with(address, [file,address](uint8_t * output, size_t bytes) { file->read_exact(address.offset, output, bytes); });
+        }
+        memory->seal(catalog);
+        memory->verify_payload_locks();
+        for (const auto & file : files) {
+            const auto stats = file->stats();
+            startup.requests += stats.requests; startup.system_reads += stats.system_reads; startup.bytes += stats.bytes;
+        }
+        snapshot.version = 1; snapshot.expert_slabs = uint32_t(catalog.size());
+        snapshot.payload_bytes = memory->payload_bytes(); snapshot.locked_bytes = memory->locked_bytes();
+        snapshot.startup_read_requests = startup.requests; snapshot.startup_read_bytes = startup.bytes;
+    }
+    glm_stage::expert_lease acquire(glm_stage::expert_address address) override { return memory->acquire(address); }
+    void report(llama_stage_storage_report & output) const override {
+        output.host_reserved_bytes = memory->payload_bytes();
+        output.native_read_requests = startup.requests; output.native_system_reads = startup.system_reads; output.native_read_bytes = startup.bytes;
+    }
+    bool report_preload(llama_stage_preload_report & output) const override { output = snapshot; return true; }
 };
 
 struct stage_weight_source;
@@ -115,12 +190,13 @@ struct stage_weight_source final : llama_stage_weight_source, std::enable_shared
     llama_stage_storage_params params;
     ggml_context_ptr metadata;
     std::map<int, stage_layer_source> layers;
-    std::vector<std::shared_ptr<glm_stage::expert_file>> files;
-    std::shared_ptr<glm_stage::desktop_experts> cache;
+    std::shared_ptr<stage_expert_reader> reader;
+    uint64_t page_budget;
     bool finalized = false;
 
-    stage_weight_source(const llama_model & model, const llama_stage_storage_params & params) : model(model), params(params) {
-        if (!model.stage_enabled || model.stage.rank == 1 || model.arch != LLM_ARCH_GLM5_NEXT ||
+    stage_weight_source(const llama_model & model, const llama_stage_storage_params & params, uint64_t page_budget = 0) :
+        model(model), params(params), page_budget(page_budget) {
+        if (!model.stage_enabled || (page_budget ? model.stage.rank != 1 : model.stage.rank == 1) || model.arch != LLM_ARCH_GLM5_NEXT ||
                 model.n_devices() > 1 || model.split_mode() == LLAMA_SPLIT_MODE_TENSOR ||
                 !model.hdmd.weight_blocks.empty() || !model.hdmd.inverse_blocks.empty() ||
                 model.hdmd.gdn_v_grouped || model.hdmd.tied_output ||
@@ -172,12 +248,13 @@ struct stage_weight_source final : llama_stage_weight_source, std::enable_shared
         }
         if (!catalog.empty()) {
             if (paths.empty() || paths.size() > 100) { throw std::invalid_argument("streamed stages require local named GGUF shards"); }
+            std::vector<std::shared_ptr<glm_stage::expert_file>> files;
             for (const auto & path : paths) {
                 if (path.empty()) { throw std::invalid_argument("streamed GGUF shard path is absent"); }
                 files.push_back(std::make_shared<glm_stage::expert_file>(std::filesystem::u8path(path)));
             }
-            cache = std::make_shared<glm_stage::desktop_experts>(model.stage.rank, files, catalog,
-                params.host_cache_bytes, params.host_cache_entries, params.max_active_reads);
+            if (page_budget) { reader = std::make_shared<preloaded_reader>(std::move(files), catalog, params, page_budget); }
+            else { reader = std::make_shared<desktop_reader>(model.stage.rank, std::move(files), catalog, params); }
         }
         finalized = true;
     }
@@ -191,13 +268,11 @@ struct stage_weight_source final : llama_stage_weight_source, std::enable_shared
     void report(llama_stage_storage_report & output) const override {
         output.streamed_tensors = uint32_t(layers.size() * 3);
         for (const auto & layer : layers) { for (const auto tensor : layer.second.logical) { output.routed_logical_bytes += ggml_nbytes(tensor); } }
-        if (cache) { output.host_reserved_bytes = cache->stats().reserved_payload_bytes; }
-        for (const auto & file : files) {
-            const auto stats = file->stats();
-            output.native_read_requests += stats.requests;
-            output.native_system_reads += stats.system_reads;
-            output.native_read_bytes += stats.bytes;
-        }
+        if (reader) { reader->report(output); }
+    }
+    bool report_preload(llama_stage_preload_report & output) const override {
+        if (!page_budget) { return false; }
+        return reader ? reader->report_preload(output) : true;
     }
     std::unique_ptr<llama_stage_context_experts> create_context(const std::vector<ggml_backend_t> & backends) override {
         if (!finalized) { throw std::runtime_error("streamed source is not finalized"); }
@@ -218,11 +293,11 @@ stage_context_experts::stage_context_experts(std::shared_ptr<stage_weight_source
         auto layer = std::make_unique<layer_context>();
         layer->owner = this;
         layer->cpu = ggml_backend_dev_type(ggml_backend_get_device(backend)) == GGML_BACKEND_DEVICE_TYPE_CPU;
-        const auto cache = this->source->cache;
+        const auto reader = this->source->reader;
         const auto & specs = registered.second.specs;
         layer->bank = std::make_unique<glm_stage::expert_bank>(backend, this->source->params.bank_slots,
             std::vector<glm_stage::expert_projection>(specs.begin(), specs.end()), std::min<uint64_t>(remaining, 1ull << 30),
-            [cache](glm_stage::expert_address address) { return cache->acquire(address); });
+            [reader](glm_stage::expert_address address) { return reader->acquire(address); });
         const uint64_t bytes = layer->bank->buffer_bytes();
         remaining -= bytes;
         buffers[ggml_backend_get_default_buffer_type(backend)] += bytes;
@@ -240,9 +315,18 @@ std::shared_ptr<llama_stage_weight_source> llama_stage_make_weight_source(
         const llama_model & model, const llama_stage_storage_params & params) {
     return std::make_shared<stage_weight_source>(model, params);
 }
+
+std::shared_ptr<llama_stage_weight_source> llama_stage_make_preloaded_source(
+        const llama_model & model, const llama_stage_preload_params & params) {
+    const llama_stage_storage_params banks{1, params.bank_slots, params.host_payload_bytes, params.context_bank_bytes, params.host_entries, 0};
+    return std::make_shared<stage_weight_source>(model, banks, params.host_page_bytes);
+}
 #else
 std::shared_ptr<llama_stage_weight_source> llama_stage_make_weight_source(
         const llama_model &, const llama_stage_storage_params &) {
     throw std::runtime_error("streamed stages require a build with LLAMA_GLM_RPC enabled");
+}
+std::shared_ptr<llama_stage_weight_source> llama_stage_make_preloaded_source(const llama_model &, const llama_stage_preload_params &) {
+    throw std::runtime_error("preloaded expert stages require a build with LLAMA_GLM_RPC enabled");
 }
 #endif

@@ -107,7 +107,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'CPU tests failed' }
           ./build/bin/test-llama-archs.exe --arch glm5-next --backend CPU --seed 53 -v 5 *> glm-cpu-fixture.log
           if ($LASTEXITCODE -ne 0) { throw 'GLM CPU fixture failed' }
-          if (-not (Select-String -Path glm-cpu-fixture.log -Pattern 'Summary: all 5 test\(s\) passed' -Quiet)) {
+          if (-not (Select-String -Path glm-cpu-fixture.log -Pattern 'Summary: all 6 test\(s\) passed' -Quiet)) {
             throw 'GLM fixture did not report completed tests'
           }
           Get-Content glm-cpu-fixture.log -Tail 8

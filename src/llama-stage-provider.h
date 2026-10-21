@@ -31,9 +31,12 @@ struct llama_stage_weight_source {
     virtual bool empty() const = 0;
     virtual uint32_t slots() const = 0;
     virtual void report(llama_stage_storage_report & output) const = 0;
+    virtual bool report_preload(llama_stage_preload_report & output) const = 0;
     virtual std::unique_ptr<llama_stage_context_experts> create_context(const std::vector<ggml_backend_t> & backends) = 0;
 };
 
 int llama_stage_expert_projection(const LLM_TN_IMPL & name);
 std::shared_ptr<llama_stage_weight_source> llama_stage_make_weight_source(
         const llama_model & model, const llama_stage_storage_params & params);
+std::shared_ptr<llama_stage_weight_source> llama_stage_make_preloaded_source(
+        const llama_model & model, const llama_stage_preload_params & params);

@@ -31,3 +31,9 @@ Linux cloud workspace, GCC 14.2, CMake 3.31.6, Ninja 1.11.1.4, CPU backend, no G
 The native Windows workflow compiles CPU, SM89, and SM120 variants and runs the CPU/worker tests plus the launcher regression under Windows PowerShell 5.1. Its result is recorded separately after the source push. It does not execute CUDA kernels.
 
 The original VM build and Wine reports are preserved in BUILD_LOG.md and TEST_REPORT.md as imported evidence. No new full model tensors were downloaded, and no inference on the user's PCs was performed during this review. Performance numbers in LIMITATIONS.md remain estimates.
+
+## GitHub Actions scope
+
+The first pushes to `master` triggered dozens of inherited upstream workflows, including Android, Apple, unrelated accelerator backends, and self-hosted runners. Unrelated runs from this import were cancelled. Workflow configuration changes are deferred; the inherited triggers are still present. See [CI_SCOPE.md](CI_SCOPE.md) before pushing further changes. Keep AMD/Vulkan compatibility in the future CI plan.
+
+The first import's Python lint run rejected a `print()` in the new reserve regression script. It now uses the repository's required logging convention; the reserve scenarios still execute normally.

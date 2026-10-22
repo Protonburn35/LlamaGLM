@@ -1,4 +1,5 @@
 """Exercise the worker's reserve guard through actual unauthenticated RPC messages."""
+import logging
 import os
 from pathlib import Path
 import socket
@@ -73,7 +74,8 @@ def check(server, reserve):
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     executable = str(Path(sys.argv[1]).resolve())
     for value in ("1", "-1", "garbage", "17592186044416", "18446744073709551616", "1,", "1,2", ""):
         check(executable, value)
-    print("PASS: 8 RPC reserve cases, overflow refusal, invalid-config refusal and continued service")
+    logging.info("PASS: 8 RPC reserve cases, overflow refusal, invalid-config refusal and continued service")

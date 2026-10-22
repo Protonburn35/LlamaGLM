@@ -1,0 +1,9 @@
+#pragma once
+#if defined(__clang__) && (defined(__CUDACC__) || defined(__CUDA_ARCH__))
+#include <new>
+#include <cstddef>
+__device__ inline void* operator new(std::size_t, void* __p) noexcept { return __p; }
+__device__ inline void* operator new[](std::size_t, void* __p) noexcept { return __p; }
+__device__ inline void operator delete(void*, void*) noexcept {}
+__device__ inline void operator delete[](void*, void*) noexcept {}
+#endif

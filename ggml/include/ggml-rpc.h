@@ -30,6 +30,10 @@ GGML_BACKEND_API void ggml_backend_rpc_start_server(const char * endpoint, const
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_rpc_reg(void);
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_rpc_add_server(const char * endpoint);
 
+// Telemetry & Verification Counters
+GGML_BACKEND_API void ggml_backend_rpc_get_telemetry(uint64_t * weight_bytes, uint32_t * weight_tensors, uint64_t * act_sent, uint64_t * act_recv, uint64_t * graphs_computed);
+GGML_BACKEND_API void ggml_backend_rpc_reset_telemetry(void);
+
 #ifdef  __cplusplus
 }
 #endif

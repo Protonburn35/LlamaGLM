@@ -1,0 +1,109 @@
+name: LlamaGLM RPC Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/llamaglm-rpc-windows.yml'
+      - 'scripts/**'
+      - 'common/**'
+      - 'ggml/**'
+      - 'src/**'
+      - 'tools/rpc/**'
+      - 'tools/fit-params/**'
+      - 'tests/test-llamaglm-launchers.ps1'
+      - 'tests/test-rpc-reserve.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: llamaglm-rpc-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Windows ${{ matrix.backend }}
+    runs-on: windows-2022
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: cpu
+            cuda: false
+            architectures: ''
+          - backend: cuda-sm89
+            cuda: true
+            architectures: '89-real'
+          - backend: cuda-sm120
+            cuda: true
+            architectures: '120a-real'
+    env:
+      CCCL_SHA: e46b01ff821f3badeea858f0124ce00a7dd7d05a
+      CUDA_ARCHS: ${{ matrix.architectures }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ggml-org/ccache-action@f09c25b45002a07be2955cbe52e8cee55643f89d # v1.2.24
+        with:
+          key: glm-win2022-static-${{ matrix.backend }}-cuda128-cccl-e46b01ff
+          max-size: 2G
+          install: binary
+          append-timestamp: false
+      - name: Install verified CUDA components
+        if: matrix.cuda
+        shell: pwsh
+        run: ./scripts/glm-install-cuda.ps1 -InstallDirectory "$env:RUNNER_TEMP/cuda-12.8.1"
+      - name: Fetch pinned CCCL
+        if: matrix.cuda
+        shell: pwsh
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/NVIDIA/cccl.git "$env:RUNNER_TEMP/cccl"
+          if ($LASTEXITCODE -ne 0) { throw 'CCCL clone failed' }
+          git -C "$env:RUNNER_TEMP/cccl" checkout --detach $env:CCCL_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'CCCL checkout failed' }
+      - name: Compile native Windows targets
+        shell: cmd
+        env:
+          ENABLE_CUDA: ${{ matrix.cuda }}
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          set "GLM_CUDA_FLAGS=-DGGML_CUDA=OFF"
+          if "%ENABLE_CUDA%"=="true" set "GLM_CUDA_FLAGS=-DGGML_CUDA=ON -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache -DCMAKE_CUDA_ARCHITECTURES=%CUDA_ARCHS% -DGGML_CUDA_FA_QUANTS=f16-f16;bf16-bf16 -DGGML_CUDA_CCCL_VERSION=%CCCL_SHA% -DFETCHCONTENT_SOURCE_DIR_CCCL=%RUNNER_TEMP%/cccl"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DGGML_NATIVE=OFF -DGGML_RPC=ON -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_BUILD_APP=OFF %GLM_CUDA_FLAGS%
+          if errorlevel 1 exit /b 1
+          cmake --build build --parallel 2 --target ggml-rpc-server llama-rpc-test llama-fit-params llama-server test-backend-ops test-llama-archs test-gguf test-arg-parser
+          if errorlevel 1 exit /b 1
+      - name: Expose CUDA runtime DLLs
+        if: matrix.cuda
+        shell: pwsh
+        run: |
+          foreach ($Name in @('cudart64_12.dll', 'cublas64_12.dll', 'cublasLt64_12.dll')) {
+            $Files = @(Get-ChildItem -LiteralPath $env:CUDA_PATH -Recurse -File -Filter $Name)
+            if ($Files.Count -ne 1) { throw "Expected one CUDA runtime file: $Name" }
+            $Files[0].DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+      - name: Run CPU fixtures and worker reserve regression
+        shell: pwsh
+        run: |
+          ctest --test-dir build -R '^(test-gguf|test-arg-parser)$' --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw 'Component tests failed' }
+          ./build/bin/test-llama-archs.exe --arch glm5-next --backend CPU --seed 53 -v 5 *> glm-cpu-fixture.log
+          if ($LASTEXITCODE -ne 0) { throw 'GLM CPU fixture failed' }
+          if (!(Select-String -Path glm-cpu-fixture.log -Pattern 'Summary: all 1 test\(s\) passed')) { throw 'Expected GLM fixture' }
+          python ./tests/test-rpc-reserve.py ./build/bin/ggml-rpc-server.exe
+          if ($LASTEXITCODE -ne 0) { throw 'RPC reserve regression failed' }
+      - name: Check launchers on Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/test-llamaglm-launchers.ps1 -BackendOps "$pwd/build/bin/test-backend-ops.exe"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rpc-development-${{ matrix.backend }}-${{ github.sha }}
+          path: |
+            build/bin/*.exe
+            glm-cpu-fixture.log
+          retention-days: 7

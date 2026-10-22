@@ -3,6 +3,10 @@ add_executable(${TARGET} rpc-server.cpp)
 target_link_libraries(${TARGET} PRIVATE ggml)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 
+add_executable(llama-rpc-test test-rpc-small.cpp)
+target_link_libraries(llama-rpc-test PRIVATE ggml)
+target_compile_features(llama-rpc-test PRIVATE cxx_std_17)
+
 if (LLAMA_BUILD_TESTS AND UNIX AND NOT GGML_BACKEND_DL)
     add_executable(test-rpc-multi-server ${PROJECT_SOURCE_DIR}/tests/test-rpc-multi-server.cpp)
     target_link_libraries(test-rpc-multi-server PRIVATE ggml ggml-rpc)
@@ -16,5 +20,5 @@ if (LLAMA_BUILD_TESTS AND UNIX AND NOT GGML_BACKEND_DL)
 endif()
 
 if(LLAMA_TOOLS_INSTALL)
-    install(TARGETS ${TARGET} RUNTIME)
+    install(TARGETS ${TARGET} llama-rpc-test RUNTIME)
 endif()

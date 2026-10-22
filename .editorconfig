@@ -63,3 +63,7 @@ end_of_line = unset
 charset = unset
 trim_trailing_whitespace = unset
 insert_final_newline = unset
+
+# Unified patch context lines may contain a single space.
+[toolchain/*.patch]
+trim_trailing_whitespace = false

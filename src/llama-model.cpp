@@ -1694,6 +1694,29 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     // assign the output layer
     pimpl->dev_output = get_layer_buft_list(n_layer_all);
 
+    // the per-layer lines above are debug only, print one line per contiguous range of layers
+    {
+        int il0 = 0;
+        for (int il = 1; il <= n_layer_all; ++il) {
+            ggml_backend_dev_t dev = pimpl->dev_layer[il - 1].dev;
+            if (il < n_layer_all && pimpl->dev_layer[il].dev == dev) {
+                continue;
+            }
+            int n_recr = 0;
+            for (int j = il0; j < il; ++j) {
+                n_recr += hparams.is_recr(j) ? 1 : 0;
+            }
+            LLAMA_LOG_INFO("%s: layers %3d-%3d (%2d layers, %2d recurrent) -> %s (%s)\n", __func__, il0, il - 1, il - il0, n_recr,
+                ggml_backend_dev_name(dev), ggml_backend_dev_description(dev));
+            il0 = il;
+        }
+        LLAMA_LOG_INFO("%s: output layer -> %s, input layer -> %s\n", __func__,
+            ggml_backend_dev_name(pimpl->dev_output.dev), ggml_backend_dev_name(pimpl->dev_input.dev));
+        if (hparams.n_layer_nextn > 0) {
+            LLAMA_LOG_INFO("%s: layers %u-%d are NextN/MTP layers (loaded only with MTP enabled)\n", __func__, hparams.n_layer(), n_layer_all - 1);
+        }
+    }
+
     const auto TENSOR_NOT_REQUIRED = llama_model_loader::TENSOR_NOT_REQUIRED;
 
     // create tensors for the weights

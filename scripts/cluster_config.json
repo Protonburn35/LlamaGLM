@@ -1,0 +1,79 @@
+{
+  "version": "0.8.0",
+  "model": {
+    "dir": "C:\\GLM-5.3-Flash\\UD-IQ3_XXS",
+    "first_shard": "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+    "shards": 4,
+    "total_gib": 112.09,
+    "text_only_weights_gib": 109.49,
+    "ctx": 8192,
+    "ubatch": 512,
+    "alias": "glm-5.3-flash"
+  },
+  "stage_a": {
+    "description": "RTX 4090 24 GB coordinator + API",
+    "host": "192.168.50.206",
+    "api_host": "127.0.0.1",
+    "api_port": 8082
+  },
+  "stage_b": {
+    "description": "RTX 4060 Laptop 8 GB",
+    "host": "192.168.50.129",
+    "port": 50052,
+    "devices": "CUDA0,CPU",
+    "threads": 0,
+    "reserve_mib": "384,2048",
+    "cache_dir": "C:\\LlamaGLM-Cache",
+    "cache_need_gib": 26,
+    "expect_gib": ["6:9", "24:40"]
+  },
+  "stage_c": {
+    "description": "RTX 5070 Ti 16 GB",
+    "host": "192.168.50.143",
+    "port": 50053,
+    "devices": "CUDA0,CPU",
+    "threads": 0,
+    "reserve_mib": "512,2048",
+    "cache_dir": "C:\\LlamaGLM-Cache",
+    "cache_need_gib": 32,
+    "expect_gib": ["14:17", "24:40"]
+  },
+  "rpc_device_names": {
+    "RPC0": "Stage B GPU (RTX 4060 Laptop)",
+    "RPC1": "Stage B RAM",
+    "RPC2": "Stage C GPU (RTX 5070 Ti)",
+    "RPC3": "Stage C RAM"
+  },
+  "profiles": {
+    "balanced": {
+      "note": "default: uses the RAM of all three PCs, about 15 GiB of Stage A weights are paged from its SSD",
+      "ngl": 31,
+      "devices": ["CUDA0", "RPC1", "RPC0", "RPC3", "RPC2"],
+      "ts": [7, 8, 2, 8, 6],
+      "fit_margin_mib": [1536, 2560, 512, 2560, 1024],
+      "layers": {
+        "A RAM (mmap)": "0-15, 35.13 GiB incl. token_embd",
+        "A RTX 4090 (CUDA0)": "16-22, 17.77 GiB",
+        "B RAM (RPC1)": "23-30, 20.31 GiB",
+        "B RTX 4060 (RPC0)": "31-32, 5.08 GiB",
+        "C RAM (RPC3)": "33-40, 20.31 GiB",
+        "C RTX 5070 Ti (RPC2)": "41-44 + NextN slot 45 (not loaded) + output, 10.87 GiB"
+      }
+    },
+    "laptop-light": {
+      "note": "laptop runs only 3 layers (2 KDA-only on its GPU); Stage A pages about 30 GiB from its SSD, much slower",
+      "ngl": 25,
+      "devices": ["CUDA0", "RPC0", "RPC1", "RPC3", "RPC2"],
+      "ts": [7, 2, 1, 9, 6],
+      "fit_margin_mib": [1536, 512, 2560, 2560, 1024],
+      "layers": {
+        "A RAM (mmap)": "0-21, 50.37 GiB incl. token_embd",
+        "A RTX 4090 (CUDA0)": "22-28, 17.77 GiB",
+        "B RTX 4060 (RPC0)": "29-30, 5.08 GiB, KDA only",
+        "B RAM (RPC1)": "31, 2.54 GiB",
+        "C RAM (RPC3)": "32-40, 22.85 GiB",
+        "C RTX 5070 Ti (RPC2)": "41-44 + NextN slot 45 (not loaded) + output, 10.87 GiB"
+      }
+    }
+  }
+}

@@ -2576,6 +2576,17 @@ static bool ggml_thread_apply_priority(int32_t prio) {
         // all our threads onto the first 4 cores which results in terrible performance with
         // n_threads > 4
         #if _WIN32_WINNT >= 0x0602
+        #if !defined(THREAD_POWER_THROTTLING_CURRENT_VERSION)
+        // older mingw-w64 headers lack this Win11 power-throttling API;
+        // definitions match newer winbase.h / the Windows SDK
+        #define THREAD_POWER_THROTTLING_CURRENT_VERSION 1
+        #define THREAD_POWER_THROTTLING_EXECUTION_SPEED 0x1
+        typedef struct _THREAD_POWER_THROTTLING_STATE {
+            DWORD Version;
+            DWORD ControlMask;
+            DWORD StateMask;
+        } THREAD_POWER_THROTTLING_STATE, *PTHR_POWER_THROTTLING_STATE;
+        #endif
         THREAD_POWER_THROTTLING_STATE t;
         ZeroMemory(&t, sizeof(t));
         t.Version     = THREAD_POWER_THROTTLING_CURRENT_VERSION;

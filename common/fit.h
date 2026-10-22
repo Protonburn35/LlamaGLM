@@ -43,6 +43,15 @@ void common_fit_print(
                  llama_model_params * mparams,
                llama_context_params * cparams);
 
+// check that the memory projected for mparams and cparams leaves the margins free on every device and on the host
+//   - host memory of mmapped weights is not counted, the OS can page it back from the model file
+//   - returns false if any device or the host would go over budget
+bool common_fit_check(
+                         const char * path_model,
+           const llama_model_params * mparams,
+         const llama_context_params * cparams,
+                       const size_t * margins); // margin per device in bytes, the first value is also used for the host
+
 void common_memory_breakdown_print(const llama_context * ctx);
 
 struct common_device_memory_data {

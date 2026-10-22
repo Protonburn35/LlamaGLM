@@ -1,0 +1,18 @@
+--- usr/lib/llvm-20/lib/clang/20/include/__clang_cuda_cmath.h	2026-10-21 23:43:29.876398335 +0000
++++ usr/lib/llvm-20/lib/clang/20/include/__clang_cuda_cmath.h	2026-10-21 23:43:29.897420420 +0000
+@@ -87,6 +87,7 @@
+ //        of the variants inside the inner region and avoid the clash.
+ #pragma omp begin declare variant match(implementation = {vendor(llvm)})
+ 
++#if !defined(CLANG_CUDA_CMATH_SKIP)
+ __DEVICE__ int isinf(float __x) { return ::__isinff(__x); }
+ __DEVICE__ int isinf(double __x) { return ::__isinf(__x); }
+ __DEVICE__ int isfinite(float __x) { return ::__finitef(__x); }
+@@ -107,6 +108,7 @@
+ __DEVICE__ bool isfinite(double __x) { return ::__isfinited(__x); }
+ __DEVICE__ bool isnan(float __x) { return ::__isnanf(__x); }
+ __DEVICE__ bool isnan(double __x) { return ::__isnan(__x); }
++#endif // !CLANG_CUDA_CMATH_SKIP
+ 
+ #if defined(__OPENMP_NVPTX__)
+ #pragma omp end declare variant

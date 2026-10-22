@@ -1277,6 +1277,11 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR);
     }
 
+    if (params.fit_params_check && !common_fit_check(params.model.path.c_str(), &mparams, &cparams, params.fit_params_target.data())) {
+        LOG_ERR("%s: projected memory use does not fit the free memory of all devices, not loading the model (--fit-check off skips this check)\n", __func__);
+        return;
+    }
+
     llama_model * model = llama_model_load_from_file(params.model.path.c_str(), mparams);
     if (model == NULL) {
         return;

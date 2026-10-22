@@ -72,6 +72,11 @@ int llama_fit_params(int argc, char ** argv) {
         common_log_flush(common_log_main());
 
         common_fit_print(params.model.path.c_str(), &mparams, &cparams);
+
+        if (params.fit_params_check && !common_fit_check(params.model.path.c_str(), &mparams, &cparams, params.fit_params_target.data())) {
+            LOG_ERR("%s: projected memory use does not fit\n", __func__);
+            return 1;
+        }
     }
 
     return 0;

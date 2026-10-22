@@ -1,5 +1,6 @@
 #include "fit.h"
 
+#include "common.h"
 #include "json.h"
 #include "log.h"
 
@@ -901,6 +902,65 @@ enum common_params_fit_status common_fit_params(
     const int64_t t1_us = llama_time_us();
     LOG_TRC("%s: fitting params to free memory took %.2f seconds\n", __func__, (t1_us - t0_us) * 1e-6);
     return status;
+}
+
+bool common_fit_check(
+        const char * path_model,
+        const llama_model_params * mparams,
+        const llama_context_params * cparams,
+        const size_t * margins) {
+    constexpr int64_t MiB = 1024*1024;
+
+    std::vector<ggml_backend_dev_t> devs;
+    uint32_t hp_ngl = 0;
+    uint32_t hp_nct = 0;
+    uint32_t hp_nex = 0;
+
+    std::vector<llama_device_memory_data> dmds;
+    try {
+        dmds = common_get_device_memory_data_impl(path_model, mparams, cparams, devs, hp_ngl, hp_nct, hp_nex, GGML_LOG_LEVEL_ERROR);
+    } catch (const std::exception & e) {
+        LOG_ERR("%s: failed to project memory use: %s\n", __func__, e.what());
+        return false;
+    }
+
+    // same rule as llama_model_base::load_tensors: AUTO uses mmap only if every device supports it
+    bool use_mmap = mparams->load_mode == LLAMA_LOAD_MODE_MMAP || mparams->load_mode == LLAMA_LOAD_MODE_MMAP_MLOCK;
+    if (mparams->load_mode == LLAMA_LOAD_MODE_AUTO) {
+        use_mmap = true;
+        for (ggml_backend_dev_t dev : devs) {
+            ggml_backend_dev_props props;
+            ggml_backend_dev_get_props(dev, &props);
+            use_mmap = use_mmap && props.caps.mmap_support;
+        }
+    }
+    use_mmap = use_mmap && llama_supports_mmap();
+
+    bool ok = true;
+    auto check = [&](const std::string & name, const llama_device_memory_data & dmd, int64_t margin, bool count_model) {
+        const int64_t model = count_model ? (int64_t) dmd.mb.model : 0;
+        const int64_t used  = model + (int64_t) dmd.mb.context + (int64_t) dmd.mb.compute;
+        const bool    fits  = used + margin <= dmd.free;
+        ok = ok && fits;
+        const std::string line = string_format("common_fit_check: %-36s %7" PRId64 " MiB free, needs %7" PRId64 " MiB (model %7" PRId64 " + context %5" PRId64 " + compute %5" PRId64 ") + margin %5" PRId64 " -> %s\n",
+            name.c_str(), dmd.free/MiB, used/MiB, model/MiB, (int64_t) dmd.mb.context/MiB, (int64_t) dmd.mb.compute/MiB, margin/MiB,
+            fits ? "ok" : "DOES NOT FIT");
+        if (fits) {
+            LOG_INF("%s", line.c_str());
+        } else {
+            LOG_ERR("%s", line.c_str());
+        }
+    };
+
+    for (size_t id = 0; id < devs.size(); id++) {
+        check(std::string(ggml_backend_dev_name(devs[id])) + " (" + ggml_backend_dev_description(devs[id]) + ")", dmds[id], margins[id], true);
+    }
+    check("Host", dmds.back(), margins[0], !use_mmap);
+    if (use_mmap && dmds.back().mb.model > 0) {
+        LOG_INF("%s: %" PRId64 " MiB of weights in host memory are mmapped from the model file and are not counted\n",
+            __func__, (int64_t) dmds.back().mb.model/MiB);
+    }
+    return ok;
 }
 
 void common_memory_breakdown_print(const struct llama_context * ctx) {

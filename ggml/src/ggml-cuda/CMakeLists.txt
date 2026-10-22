@@ -50,7 +50,7 @@ if (CUDAToolkit_FOUND)
                 list(APPEND CMAKE_CUDA_ARCHITECTURES 89-real 90-virtual)
             endif()
 
-            if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
+            if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8" AND CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
                 # The CUDA architecture 120f-virtual would in principle work for Blackwell support
                 #     but the newly added "f" suffix conflicted with a preexising regex for validating CUDA architectures in CMake.
                 # So either a recent CMake version or one with the backported fix is needed.
@@ -193,14 +193,26 @@ if (CUDAToolkit_FOUND)
 
     set(CUDA_CXX_FLAGS "")
 
-    set(CUDA_FLAGS -use_fast_math -extended-lambda)
+    if (CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
+        set(CUDA_FLAGS -use_fast_math -extended-lambda)
+    else()
+        # clang CUDA: nvcc's -use_fast_math is unreliable through the driver;
+        # scope -ffast-math to the device pass only. CCCL uses placement new
+        # without including <new>, which clang requires explicitly.
+        # -fno-finite-math-only: unlike nvcc fast math, clang -ffast-math assumes no inf/nan and folds
+        # compares with -INFINITY, which the softmax, mask, flash attention and MoE top-k kernels use
+        set(CUDA_FLAGS -Xarch_device -ffast-math -Xarch_device -fno-finite-math-only)
+        if (MINGW)
+            list(APPEND CUDA_FLAGS -include "${CMAKE_CURRENT_SOURCE_DIR}/../../../toolchain/clang-cuda-shim" -femulated-tls)
+        endif()
+    endif()
 
     if (GGML_CUDA_DEBUG)
         list(APPEND CUDA_FLAGS -lineinfo)
         add_compile_definitions(GGML_CUDA_DEBUG)
     endif()
 
-    if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
+    if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8" AND CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
         # Options are:
         # - none (not recommended)
         # - speed (nvcc's default)
@@ -214,32 +226,38 @@ if (CUDAToolkit_FOUND)
     endif()
 
     if (GGML_ALL_WARNINGS AND NOT MSVC)
-        set(NVCC_CMD ${CMAKE_CUDA_COMPILER} .c)
-        if (NOT CMAKE_CUDA_HOST_COMPILER STREQUAL "")
-            list(APPEND NVCC_CMD -ccbin ${CMAKE_CUDA_HOST_COMPILER})
-        endif()
-
-        execute_process(
-            COMMAND ${NVCC_CMD} -Xcompiler --version
-            OUTPUT_VARIABLE CUDA_CCFULLVER
-            ERROR_QUIET
-        )
-
-        if (NOT CUDA_CCFULLVER MATCHES clang)
-            set(CUDA_CCID "GNU")
-            execute_process(
-                COMMAND ${NVCC_CMD} -Xcompiler "-dumpfullversion -dumpversion"
-                OUTPUT_VARIABLE CUDA_CCVER
-                ERROR_QUIET
-                OUTPUT_STRIP_TRAILING_WHITESPACE
-            )
-        else()
-            if (CUDA_CCFULLVER MATCHES Apple)
-                set(CUDA_CCID "AppleClang")
-            else()
-                set(CUDA_CCID "Clang")
+        if (CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
+            set(NVCC_CMD ${CMAKE_CUDA_COMPILER} .c)
+            if (NOT CMAKE_CUDA_HOST_COMPILER STREQUAL "")
+                list(APPEND NVCC_CMD -ccbin ${CMAKE_CUDA_HOST_COMPILER})
             endif()
-            string(REGEX REPLACE "^.* version ([0-9.]*).*$" "\\1" CUDA_CCVER ${CUDA_CCFULLVER})
+
+            execute_process(
+                COMMAND ${NVCC_CMD} -Xcompiler --version
+                OUTPUT_VARIABLE CUDA_CCFULLVER
+                ERROR_QUIET
+            )
+
+            if (NOT CUDA_CCFULLVER MATCHES clang)
+                set(CUDA_CCID "GNU")
+                execute_process(
+                    COMMAND ${NVCC_CMD} -Xcompiler "-dumpfullversion -dumpversion"
+                    OUTPUT_VARIABLE CUDA_CCVER
+                    ERROR_QUIET
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                )
+            else()
+                if (CUDA_CCFULLVER MATCHES Apple)
+                    set(CUDA_CCID "AppleClang")
+                else()
+                    set(CUDA_CCID "Clang")
+                endif()
+                string(REGEX REPLACE "^.* version ([0-9.]*).*$" "\\1" CUDA_CCVER ${CUDA_CCFULLVER})
+            endif()
+        else()
+            # clang CUDA driver: the host and device compiler are clang itself
+            set(CUDA_CCID "Clang")
+            set(CUDA_CCVER ${CMAKE_CUDA_COMPILER_VERSION})
         endif()
 
         message(STATUS "CUDA host compiler is ${CUDA_CCID} ${CUDA_CCVER}")

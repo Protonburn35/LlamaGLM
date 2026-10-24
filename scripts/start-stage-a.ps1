@@ -34,7 +34,11 @@ foreach ($k in $p.layers.PSObject.Properties) {
 
 # ---- Gate 0: files, driver, model --------------------------------------------------------------
 Test-RequiredFiles @("llama-rpc-test.exe", "ggml-rpc.dll", "ggml-cpu.dll", "ggml-base.dll", "ggml.dll")
-Test-RequiredFiles @("llama-server.exe", "llama-fit-params.exe", "ggml-cuda.dll", "ggml-rpc.dll", "libllama.dll") $BinDir
+Test-RequiredFiles @("llama-server.exe", "llama-fit-params.exe", "ggml-cuda.dll", "ggml-rpc.dll") $BinDir
+# MSVC builds (our GitHub package, the official llama.cpp build) name it llama.dll, MinGW builds libllama.dll
+if (!(Test-Path (Join-Path $BinDir "llama.dll")) -and !(Test-Path (Join-Path $BinDir "libllama.dll"))) {
+    throw "Missing files in $BinDir : llama.dll (or libllama.dll). Extract the whole release zip there."
+}
 $ownBuild = (Resolve-Path $BinDir).Path -eq (Resolve-Path $PSScriptRoot).Path
 if (!$ownBuild) {
     Write-LogLine $log "[NOTE] -BinDir ${BinDir}: upstream binaries print the Gate 2 projection but cannot refuse a plan that does not fit; read the numbers yourself." "Yellow"

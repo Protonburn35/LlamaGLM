@@ -1,0 +1,161 @@
+name: LlamaGLM Windows package
+
+# Builds the Windows CUDA package for the three PCs with MSVC + nvcc (CUDA 12.8.1, sm_89 + sm_120a).
+# Manual only: Actions > LlamaGLM Windows package > Run workflow. The package is the run's artifact.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: llamaglm-package-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Windows CUDA package
+    runs-on: windows-2022
+    timeout-minutes: 300
+    env:
+      CCCL_SHA: e46b01ff821f3badeea858f0124ce00a7dd7d05a
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ggml-org/ccache-action@f09c25b45002a07be2955cbe52e8cee55643f89d # v1.2.24
+        with:
+          key: glm-win2022-package-cuda128-sm89-sm120-cccl-e46b01ff
+          max-size: 2G
+          install: binary
+          append-timestamp: false
+      - name: Install verified CUDA components
+        shell: pwsh
+        run: ./scripts/glm-install-cuda.ps1 -InstallDirectory "$env:RUNNER_TEMP/cuda-12.8.1"
+      - name: Fetch pinned CCCL
+        shell: pwsh
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/NVIDIA/cccl.git "$env:RUNNER_TEMP/cccl"
+          if ($LASTEXITCODE -ne 0) { throw 'CCCL clone failed' }
+          git -C "$env:RUNNER_TEMP/cccl" checkout --detach $env:CCCL_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'CCCL checkout failed' }
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache -DBUILD_SHARED_LIBS=ON -DGGML_BACKEND_DL=ON -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_RPC=ON -DGGML_CUDA=ON "-DCMAKE_CUDA_ARCHITECTURES=89-real;120a-real" -DGGML_CUDA_CCCL_VERSION=%CCCL_SHA% -DFETCHCONTENT_SOURCE_DIR_CCCL=%RUNNER_TEMP%/cccl -DLLAMA_BUILD_TESTS=ON -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_BUILD_APP=OFF
+          if errorlevel 1 exit /b 1
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build -j %NINJA_JOBS% --target ggml-cpu ggml-cuda ggml-rpc llama-server llama-cli llama-bench llama-fit-params ggml-rpc-server llama-rpc-test test-backend-ops llama-gguf-split
+          if errorlevel 1 exit /b 1
+      - name: Assemble package
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content scripts/cluster_config.json -Raw | ConvertFrom-Json).version
+          $pkg = Join-Path $env:GITHUB_WORKSPACE 'dist/LlamaGLM-win-cuda-x64'
+          New-Item -ItemType Directory -Force (Join-Path $pkg 'docs') | Out-Null
+          foreach ($exe in @('llama-server', 'llama-cli', 'llama-bench', 'llama-fit-params', 'ggml-rpc-server', 'llama-rpc-test', 'test-backend-ops', 'llama-gguf-split')) {
+            Copy-Item "build/bin/$exe.exe" $pkg
+          }
+          Copy-Item build/bin/*.dll $pkg
+          foreach ($name in @('cudart64_12.dll', 'cublas64_12.dll', 'cublasLt64_12.dll')) {
+            $files = @(Get-ChildItem -LiteralPath $env:CUDA_PATH -Recurse -File -Filter $name)
+            if ($files.Count -ne 1) { throw "Expected one CUDA runtime file: $name" }
+            Copy-Item $files[0].FullName $pkg
+          }
+          # app-local MSVC runtime, so the PCs need no Visual C++ Redistributable
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $crt = & $vswhere -latest -find 'VC\Redist\MSVC\**\x64\Microsoft.VC14*.CRT\vcruntime140.dll' | Where-Object { $_ -notmatch '\\onecore\\' } | Sort-Object -Descending | Select-Object -First 1
+          if (!$crt) { throw 'MSVC runtime not found' }
+          Copy-Item (Join-Path (Split-Path $crt) '*.dll') $pkg
+          foreach ($f in @('llamaglm-common.ps1', 'start-stage-a.ps1', 'start-worker.ps1', 'start-stage-b.ps1', 'start-stage-c.ps1', 'smoke-test.ps1', 'collect-logs.ps1', 'cluster_config.json')) {
+            Copy-Item "scripts/$f" $pkg
+          }
+          foreach ($f in @('INSTALL-WINDOWS.md', 'FIRST-RUN.md', 'README.md', 'HANDOFF.md', 'LIMITATIONS.md')) {
+            Copy-Item $f $pkg
+          }
+          foreach ($f in @('ARCHITECTURE', 'BUILD_LOG', 'BUILD_MATRIX', 'CI_SCOPE', 'DECISIONS', 'DEEPSEEKRPC_LESSONS', 'MEMORY_PLAN', 'NUMERICAL_FIDELITY', 'OPEN_ISSUES', 'REVIEW-v0.8.0', 'RPC_PROTOCOL', 'TEST_REPORT', 'UPSTREAM_AUDIT')) {
+            Copy-Item "docs/$f.md" (Join-Path $pkg 'docs')
+          }
+
+          # every DLL a program or library imports must be in the package or be part of Windows
+          $dumpbin = & $vswhere -latest -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          $present = @(Get-ChildItem $pkg -File | ForEach-Object { $_.Name.ToLowerInvariant() })
+          $missing = @()
+          foreach ($bin in @(Get-ChildItem $pkg -File | Where-Object { $_.Extension -in '.exe', '.dll' })) {
+            $deps = @(& $dumpbin /nologo /dependents $bin.FullName | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[\w.-]+\.dll$' })
+            foreach ($dep in $deps) {
+              $n = $dep.ToLowerInvariant()
+              if ($present -contains $n -or $n -like 'api-ms-win-*' -or $n -like 'ext-ms-*' -or $n -eq 'nvcuda.dll') { continue }
+              if ($n -notmatch '^(msvcp|vcruntime|concrt|vcomp|ucrtbased|cudart|cublas|nvrtc|nvjitlink)' -and (Test-Path (Join-Path $env:SystemRoot "System32\$n"))) { continue }
+              $missing += "$($bin.Name) -> $dep"
+            }
+          }
+          if ($missing.Count -gt 0) {
+            $missing | ForEach-Object { Write-Host $_ }
+            throw 'The package is missing DLLs'
+          }
+
+          $commit = git rev-parse HEAD
+          $lines = @(
+            "LlamaGLM v$version",
+            "source commit: $commit",
+            "build: GitHub Actions run $env:GITHUB_RUN_ID, MSVC + nvcc, CUDA 12.8.1, sm_89 + sm_120a, AVX2 CPU backend",
+            'upstream base: llama.cpp b11780 (1242be66f)',
+            "built: $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))",
+            ''
+          )
+          foreach ($f in @(Get-ChildItem $pkg -Recurse -File | Sort-Object FullName)) {
+            $rel = './' + [System.IO.Path]::GetRelativePath($pkg, $f.FullName).Replace('\', '/')
+            $lines += '{0}  {1}' -f (Get-FileHash -Algorithm SHA256 $f.FullName).Hash.ToLowerInvariant(), $rel
+          }
+          Set-Content -Path (Join-Path $pkg 'MANIFEST.txt') -Value $lines -Encoding utf8
+          Get-ChildItem $pkg -File | Sort-Object Name | Format-Table Name, Length -AutoSize | Out-String -Width 200 | Write-Host
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "dir=$pkg" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Check the package on CPU
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pkg = '${{ steps.package.outputs.dir }}'
+          foreach ($exe in @('llama-server', 'llama-cli', 'llama-fit-params')) {
+            & (Join-Path $pkg "$exe.exe") --version
+            if ($LASTEXITCODE -ne 0) { throw "$exe --version failed" }
+          }
+          python ./tests/test-rpc-reserve.py (Join-Path $pkg 'ggml-rpc-server.exe')
+          if ($LASTEXITCODE -ne 0) { throw 'RPC reserve regression failed' }
+          $workers = @()
+          try {
+            foreach ($port in @(50152, 50153)) {
+              $workers += Start-Process -FilePath (Join-Path $pkg 'ggml-rpc-server.exe') -ArgumentList @('-d', 'CPU', '-H', '127.0.0.1', '-p', "$port") -PassThru -NoNewWindow
+            }
+            foreach ($port in @(50152, 50153)) {
+              $deadline = (Get-Date).AddSeconds(60)
+              while ($true) {
+                $client = New-Object System.Net.Sockets.TcpClient
+                try { $client.Connect('127.0.0.1', $port); break } catch { if ((Get-Date) -gt $deadline) { throw "worker on port $port did not start" }; Start-Sleep -Milliseconds 250 } finally { $client.Dispose() }
+              }
+            }
+            & (Join-Path $pkg 'llama-rpc-test.exe') --devices 1 127.0.0.1:50152 127.0.0.1:50153
+            if ($LASTEXITCODE -ne 0) { throw 'Gate 1 against two local CPU workers failed' }
+          } finally {
+            $workers | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+          }
+      - name: Check launchers on Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          foreach ($f in Get-ChildItem "${{ steps.package.outputs.dir }}\*.ps1") {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errors)
+            if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host "$($f.Name): $_" }; exit 1 }
+          }
+          ./tests/test-llamaglm-launchers.ps1 -BackendOps "${{ steps.package.outputs.dir }}\test-backend-ops.exe"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: LlamaGLM-v${{ steps.package.outputs.version }}-win-cuda-cu12.8-sm89-sm120-x64
+          path: ${{ steps.package.outputs.dir }}
+          if-no-files-found: error
+          retention-days: 30

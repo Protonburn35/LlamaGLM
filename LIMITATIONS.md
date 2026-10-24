@@ -1,4 +1,4 @@
-# LlamaGLM v0.8.0 - limitations
+# LlamaGLM v0.8.1 - limitations
 
 Status: built, **not yet run on the three PCs**. All speed figures below are **estimates from bandwidth arithmetic** (real tensor sizes from the GGUF headers, published bandwidth of the parts). They are not measurements. The first real run (`smoke-test.ps1`) replaces them.
 
@@ -84,7 +84,7 @@ A prompt processes many tokens per pass (512 per ubatch here), so the weights ar
 
 | # | Limitation | Type | Notes |
 |---|---|---|---|
-| 1 | **No run on the real PCs yet.** The CUDA code is cross-compiled with clang on Linux, not with nvcc (not an upstream-supported way to build ggml-cuda). | IMPL (toolchain) | The per-GPU self-test (`test-backend-ops`, about 1-5 min) runs the model's ops on every GPU before any model data moves. If kernels misbehave, the official llama.cpp b11780 nvcc build of the same source runs the same plan: `-BinDir` (FIRST-RUN.md section 6). |
+| 1 | **No run on the real PCs yet.** v0.8.1 is built with MSVC and nvcc (the upstream-supported toolchain) on GitHub Actions; the earlier v0.8.0 was cross-compiled with clang on Linux. | IMPL | The per-GPU self-test (`test-backend-ops`, about 1-5 min) runs the model's ops on every GPU before any model data moves. If kernels misbehave, the official llama.cpp b11780 build (CUDA 13.4) of the same upstream source runs the same plan: `-BinDir` (FIRST-RUN.md section 6). |
 | 2 | Root cause of the earlier "illegal memory access" is unknown. | IMPL / unknown | Fixed suspects: clang finite-math kernels, infeasible memory plan, sysmem fallback, unified memory. A real kernel bug for GLM5 shapes is not excluded. |
 | 3 | Answer check is a plausibility test (Paris, 2+2=4). | IMPL | Catches broken kernels (garbage tokens). It does not prove full numerical accuracy; a perplexity comparison against the official build would. |
 | 4 | Memory fits are tight: B and C each need about 24 GiB free RAM, the 4090 about 20 GiB free VRAM. | HW | Gate 2 and the worker reserve refuse before anything is allocated. Nothing protects a running model: starting a game or many browser tabs on B or C can push worker weights into the page file (very slow) or fail a CUDA allocation (worker crash). |
@@ -102,11 +102,11 @@ A prompt processes many tokens per pass (512 per ubatch here), so the weights ar
 | 11 | Context is 8K and one request at a time (`-c 8192 -np 1`). | BOTH | KV memory is small (DSA layers only), so 32-64K would probably fit (Gate 2 shows it). But at 15-50 tok/s prefill, a 30K-token agent prompt takes 10-30 min. Nothing here supports 1M context. |
 | 12 | No MTP/NextN speculation, no vision. | IMPL | MTP gains about 1.05-1.25x, and only with a hot-expert cache (section 1). |
 | 13 | RPC has no authentication or encryption. | IMPL (upstream) | Firewall rules allow only 192.168.50.206. Never forward 50052/50053. The API listens on 127.0.0.1:8082 only. |
-| 14 | CPU backend uses AVX2 only. The 7800X3D and 9800X3D also have AVX-512. | IMPL | Maybe 10-20% more CPU speed with `GGML_CPU_ALL_VARIANTS` (untested with MinGW). |
+| 14 | CPU backend uses AVX2 only. The 7800X3D and 9800X3D also have AVX-512. | IMPL | Maybe 10-20% more CPU speed with `GGML_CPU_ALL_VARIANTS` (not used yet: the launchers expect a single `ggml-cpu.dll`). |
 | 15 | Worker threads = all physical cores. On a laptop CPU with E-cores this can be slower than P-cores only. | IMPL (config) | Set `stage_b.threads` in `cluster_config.json`. |
 | 16 | Windows PowerShell 5.1 not tested (scripts tested with PowerShell 7 on Linux). | IMPL | If a 5.1 error appears, run the same script with `pwsh`. |
 | 17 | Worker weight caches are never cleaned. | IMPL | Delete `C:\LlamaGLM-Cache` to reclaim space after a model change. |
-| 18 | clang could not unroll some loops that nvcc unrolls (7148 `loop not unrolled` warnings in this build, almost all from the flash-attention and quantized matrix kernel templates). | IMPL (toolchain) | Correctness is not affected, but those GPU kernels may be slower than in the official nvcc build. GPU time is a small part of each token in this plan, so the effect on the estimates above is small. |
+| 18 | v0.8.0 only: clang could not unroll some loops that nvcc unrolls (7148 `loop not unrolled` warnings, almost all from the flash-attention and quantized matrix kernel templates). | IMPL (toolchain) | Gone in v0.8.1, which uses nvcc. Correctness was not affected. |
 
 ## 4. Summary
 

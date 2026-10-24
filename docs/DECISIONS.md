@@ -26,3 +26,6 @@ The VM cannot run nvcc for Windows. clang's `-ffast-math` must not imply finite 
 
 ## D9. Stay on b11780 for now
 Newer upstream commits (to `a37cc4610`) bring no fix needed here; staying on b11780 keeps our build and the official reference identical in source.
+
+## D10. Build the Windows package with MSVC + nvcc on GitHub Actions (v0.8.1)
+The clang cross build of D8 is not an upstream-supported way to build ggml-cuda. GitHub's Windows runners build with nvcc, the toolchain of the official releases. CUDA version (12.8), GPU targets (sm_89, sm_120a), CPU level (AVX2) and launchers stay as in v0.8.0, so plans and gates do not change.

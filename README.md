@@ -2,7 +2,7 @@
 
 GLM-5.3-Flash (`unsloth/GLM-5.3-Flash-GGUF`, `UD-IQ3_XXS`, 112.1 GiB) across three Windows 11 PCs on a LAN, using upstream llama.cpp (b11780) with `ggml-cuda` and `ggml-rpc` plus a small set of safety patches and launchers.
 
-**Status: no successful inference on the real PCs yet.** Version 0.8.0 fixes the defects found in the 0.7.0 release (see `HANDOFF.md`). It was built for Windows on 2026-10-22 and has not run on the hardware yet.
+**Status: no successful inference on the real PCs yet.** Version 0.8.0 fixed the defects found in the 0.7.0 release (see `HANDOFF.md`). Version 0.8.1 is the same code plus the import-review fixes, built with MSVC and nvcc by a GitHub Actions workflow instead of the VM's clang cross-build. Neither has run on the hardware yet.
 
 **Speed:** estimated 1.5-4 tokens/s output and 15-50 tokens/s prompt processing. These speed estimates have not been measured on the three PCs; see [`LIMITATIONS.md`](LIMITATIONS.md).
 

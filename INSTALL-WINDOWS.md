@@ -4,7 +4,7 @@ The step-by-step run is in `FIRST-RUN.md`. This page lists what each PC needs.
 
 ## All three PCs
 - Windows 11 x64, NVIDIA driver R570 or newer. (The optional `-BinDir` reference build of llama.cpp b11780 with CUDA 13.4 needs R580 or newer.)
-- `C:\LlamaGLM` = contents of `LlamaGLM-v0.8.0-win-cuda-cu12.8-sm89-sm120-x64.zip`. Same version on all PCs; remove older versions first. Check the zip against `LlamaGLM-v0.8.0.SHA256SUMS` (`Get-FileHash <zip> -Algorithm SHA256`).
+- `C:\LlamaGLM` = contents of `LlamaGLM-v0.8.1-win-cuda-cu12.8-sm89-sm120-x64.zip`. Same version on all PCs; remove older versions first. `MANIFEST.txt` lists the SHA-256 of every file (`Get-FileHash <file> -Algorithm SHA256`).
 - NVIDIA Control Panel: "CUDA - Sysmem Fallback Policy" = "Prefer No Sysmem Fallback".
 - PowerShell may need `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` and `Get-ChildItem C:\LlamaGLM\*.ps1 | Unblock-File`.
 - `cluster_config.json` must be identical on all PCs (addresses, ports).
@@ -27,7 +27,7 @@ The step-by-step run is in `FIRST-RUN.md`. This page lists what each PC needs.
 - Fixed IP addresses (router DHCP reservation) avoid editing `cluster_config.json`.
 
 ## Package contents
-`llama-server.exe`, `ggml-rpc-server.exe`, `llama-fit-params.exe` (Gate 2), `llama-rpc-test.exe` (Gate 1), `test-backend-ops.exe` (CUDA self-test), `llama-cli.exe`, `llama-bench.exe`, `llama-gguf-split.exe`, the ggml/llama DLLs (`ggml-cuda.dll` with sm_89 + sm_120a code), CUDA 12.8 runtime DLLs, MinGW runtime DLLs, the launchers (`start-stage-a.ps1`, `start-stage-b.ps1`, `start-stage-c.ps1`, `start-worker.ps1`, `smoke-test.ps1`, `collect-logs.ps1`, `llamaglm-common.ps1`), `cluster_config.json`, `MANIFEST.txt` (source commit and file hashes), docs.
+`llama-server.exe`, `ggml-rpc-server.exe`, `llama-fit-params.exe` (Gate 2), `llama-rpc-test.exe` (Gate 1), `test-backend-ops.exe` (CUDA self-test), `llama-cli.exe`, `llama-bench.exe`, `llama-gguf-split.exe`, the ggml/llama DLLs (`ggml-cuda.dll` with sm_89 + sm_120a code), CUDA 12.8 runtime DLLs, the Microsoft Visual C++ runtime DLLs, the launchers (`start-stage-a.ps1`, `start-stage-b.ps1`, `start-stage-c.ps1`, `start-worker.ps1`, `smoke-test.ps1`, `collect-logs.ps1`, `llamaglm-common.ps1`), `cluster_config.json`, `MANIFEST.txt` (source commit and file hashes), docs.
 
 Logs go to `C:\LlamaGLM\logs` on each PC.
 
@@ -35,4 +35,4 @@ Logs go to `C:\LlamaGLM\logs` on each PC.
 
 The GitHub checkout contains the engine at its root, with launchers and `cluster_config.json` under `scripts/`. The VM export's nested `LlamaGLM-master/` directory has been flattened. When assembling a binary folder, copy `scripts/*.ps1` and `scripts/cluster_config.json` beside the executables. `scripts/package-release.sh` uses `build-win-cuda/` by default, or the directory selected by `LLAMAGLM_BUILD_DIR`.
 
-The GitHub Windows workflow produces development executables for build verification. The existing v0.8.0 archive and its VM commit labels describe the original cross-build; they do not include the follow-up source fixes listed in `docs/REVIEW-v0.8.0.md`.
+The Windows package is built by `.github/workflows/llamaglm-package-windows.yml` (run it by hand in GitHub Actions; the package is the run's artifact) with MSVC and nvcc. `.github/workflows/llamaglm-rpc-windows.yml` only produces development executables for build verification. The earlier v0.8.0 archive was a clang cross-build on the VM; it does not include the follow-up source fixes listed in `docs/REVIEW-v0.8.0.md`.

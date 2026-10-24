@@ -1,5 +1,5 @@
 {
-  "version": "0.8.0",
+  "version": "0.8.1",
   "model": {
     "dir": "C:\\GLM-5.3-Flash\\UD-IQ3_XXS",
     "first_shard": "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",

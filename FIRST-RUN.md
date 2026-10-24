@@ -1,4 +1,4 @@
-# LlamaGLM first run (v0.8.0)
+# LlamaGLM first run (v0.8.1)
 
 No inference has worked on these PCs yet. This version runs cheap checks first and stops at the first problem, so a bad plan or a broken GPU kernel shows up as a clear message instead of a frozen desktop. Do the steps in order; each one stops on failure.
 
@@ -14,7 +14,7 @@ Only PC A needs the model (`C:\GLM-5.3-Flash\UD-IQ3_XXS\`, 4 shards, 112.10 GiB)
 
 ## 0. One-time setup (all 3 PCs)
 
-1. Unzip `LlamaGLM-v0.8.0-win-cuda-cu12.8-sm89-sm120-x64.zip` so that `C:\LlamaGLM\llama-server.exe` exists. Use the **same version on all 3 PCs**. Delete the old v0.7.0 files first. To check which build you have: `MANIFEST.txt` starts with `LlamaGLM v0.8.0`, and `.\llama-cli.exe --version` prints `version: 0.7.0-dev (build 7, commit 502ff59)`. The "0.7.0-dev" there is llama.cpp's own library version, not the LlamaGLM version; commit `502ff59` is what identifies v0.8.0.
+1. Unzip `LlamaGLM-v0.8.1-win-cuda-cu12.8-sm89-sm120-x64.zip` (the download of the "LlamaGLM Windows package" GitHub Actions run) so that `C:\LlamaGLM\llama-server.exe` exists. Use the **same version on all 3 PCs**. Delete older versions (v0.7.0, v0.8.0) first. To check which build you have: `MANIFEST.txt` starts with `LlamaGLM v0.8.1` and names the source commit, and `.\llama-cli.exe --version` prints the same commit. The "version" number that `llama-cli` prints is llama.cpp's own library version, not the LlamaGLM version.
 2. NVIDIA driver R570 or newer (any driver that runs the RTX 5070 Ti is new enough).
 3. **NVIDIA Control Panel > Manage 3D settings > Global settings > "CUDA - Sysmem Fallback Policy" = "Prefer No Sysmem Fallback".** With the default, a full GPU silently spills into shared system RAM, which is one likely cause of the earlier near-freeze.
 4. Firewall, Admin PowerShell, once (only PC A may connect):
@@ -97,7 +97,7 @@ To move one layer from a worker's RAM to Stage A, lower that device's `ts` value
   .\start-stage-c.ps1 -BinDir C:\llama-b11780      # C, and the same with start-stage-b.ps1 on B
   .\start-stage-a.ps1 -BinDir C:\llama-b11780      # A
   ```
-  The same plan and gates are used. The upstream build prints the Gate 2 table but cannot refuse a plan that does not fit, so read the `needs` vs `free` numbers yourself. If the official build works where ours fails, the cross-compiler is the cause.
+  The same plan and gates are used. The upstream build prints the Gate 2 table but cannot refuse a plan that does not fit, so read the `needs` vs `free` numbers yourself. Both builds use nvcc; if the official build works where ours fails, the difference is in our build (CUDA 12.8 instead of 13.4, or the LlamaGLM patches).
 - **Optional, saves walking upstairs:** share the worker log folders read-only on the LAN (on B and C, Admin PowerShell: `New-SmbShare -Name LlamaGLM-Logs -Path C:\LlamaGLM\logs -ReadAccess "$env:USERNAME"`). Then `collect-logs.ps1` on A also copies the worker logs.
 
 ## 7. Stop

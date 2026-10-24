@@ -19,6 +19,7 @@ New-Item -ItemType Directory -Force -Path $work | Out-Null
 $logs = Join-Path $PSScriptRoot "logs"
 if (Test-Path $logs) {
     Copy-Item -Path (Join-Path $logs "*.log") -Destination $work -ErrorAction SilentlyContinue
+    Copy-Item -Path (Join-Path $logs "*.csv") -Destination $work -ErrorAction SilentlyContinue
 }
 
 $info = Join-Path $work ("system-{0}.txt" -f $env:COMPUTERNAME)
@@ -44,6 +45,7 @@ if (!$NoWorkers) {
             $dst = Join-Path $work ("worker-" + $w.host)
             New-Item -ItemType Directory -Force -Path $dst | Out-Null
             Get-ChildItem -Path $share -Filter "*.log" | Sort-Object LastWriteTime -Descending | Select-Object -First 10 | Copy-Item -Destination $dst
+            Get-ChildItem -Path $share -Filter "*.csv" | Sort-Object LastWriteTime -Descending | Select-Object -First 5 | Copy-Item -Destination $dst
             Write-Host "copied worker logs from $share"
         } else {
             Write-Host "no log share at $share (optional, see the top of this script)" -ForegroundColor DarkGray

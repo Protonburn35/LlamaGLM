@@ -3,6 +3,7 @@
 #include "llama-impl.h"
 #include "llama-model.h"
 #include "llama-moe-cache.h"
+#include "llama-moe-prefetch.h"
 #include "llama-batch.h"
 #include "llama-cparams.h"
 #include "llama-sampler.h"
@@ -2317,6 +2318,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
     // the experts of host-resident layers may be read from the MoE cache
     ggml_tensor * slots = build_moe_cache_slots(selected_experts, up_exps, gate_exps, down_exps, gate_up_exps, il);
+
+    // optional OS read-ahead of the selected experts that the matmuls below read from host memory
+    if (slots == nullptr) {
+        ggml_tensor * exps[] = { gate_up_exps, gate_exps, up_exps, down_exps };
+        if (ggml_tensor * prefetch = llama_moe_prefetch(ctx0, selected_experts, exps, 4)) {
+            cb(prefetch, "ffn_moe_prefetch", il);
+            ggml_build_forward_expand(gf, prefetch);
+        }
+    }
 
     cur = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
 

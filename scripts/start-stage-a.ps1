@@ -4,14 +4,24 @@
 #   Gate 1  local CUDA self-test, then remote RPC device check (small tensors only)
 #   Gate 2  memory projection for the real model on every device (no allocation)
 # Only then it starts llama-server. Use -PlanOnly to stop after Gate 2.
+# Experiments are off unless a switch below (or "options" in cluster_config.json) turns them on.
 param (
-    [ValidateSet("balanced", "laptop-light")][string]$Plan = "balanced",
+    [ValidateSet("balanced", "balanced-mtp", "tight", "tight-mtp", "laptop-light")][string]$Plan = "balanced",
     [string]$ModelDir = "",
     [switch]$PlanOnly,
     [switch]$SkipSelfTest,
     [switch]$SkipRpcTest,
     [switch]$Diagnostic,
     [switch]$OpOffload,
+    # speculative decoding with the model's own MTP block; needs a plan with room for it (balanced-mtp, tight-mtp)
+    [switch]$Mtp,
+    [ValidateRange(0, 8)][int]$MtpDraftMax = 0,
+    # ask Windows to read the selected experts of Stage A's RAM layers ahead of use (LLAMA_MOE_PREFETCH)
+    [switch]$Prefetch,
+    # print per-device time per token every 30 s in the server log (GGML_SCHED_PROFILE)
+    [switch]$Timing,
+    [ValidateRange(0, 64)][int]$Threads = 0,
+    [ValidateSet(0, 256, 512, 1024, 2048)][int]$UBatch = 0,
     # folder with llama-server.exe / llama-fit-params.exe, e.g. the official llama.cpp b11780 CUDA build
     [string]$BinDir = $PSScriptRoot,
     [string]$ConfigPath = (Join-Path $PSScriptRoot "cluster_config.json")
@@ -22,6 +32,7 @@ $ErrorActionPreference = "Stop"
 
 $cfg = Get-LlamaGlmConfig $ConfigPath
 $p = $cfg.profiles.$Plan
+$opt = $cfg.options
 $log = New-LlamaGlmLogPath "stage-a"
 $nodeB = "{0}:{1}" -f $cfg.stage_b.host, $cfg.stage_b.port
 $nodeC = "{0}:{1}" -f $cfg.stage_c.host, $cfg.stage_c.port
@@ -111,6 +122,24 @@ if ($Diagnostic) {
     Set-DiagnosticEnv $log
 }
 
+# ---- options: a switch or "options" in cluster_config.json turns an experiment on ---------------------
+$useMtp      = $Mtp -or ($opt -and $opt.mtp)
+$draftMax    = if ($MtpDraftMax -gt 0) { $MtpDraftMax } elseif ($opt -and $opt.mtp_draft_max -gt 0) { [int]$opt.mtp_draft_max } else { 1 }
+$usePrefetch = $Prefetch -or ($opt -and $opt.moe_prefetch)
+$useTiming   = $Timing -or ($opt -and $opt.timing)
+$useOffload  = $OpOffload -or ($opt -and $opt.op_offload)
+$threadsA    = if ($Threads -gt 0) { $Threads } elseif ($cfg.stage_a.threads -gt 0) { [int]$cfg.stage_a.threads } else { 0 }
+$ubatch      = if ($UBatch -gt 0) { $UBatch } else { [int]$cfg.model.ubatch }
+Set-OptionalEnv $log "LLAMA_MOE_PREFETCH" $usePrefetch
+Set-OptionalEnv $log "GGML_SCHED_PROFILE" $useTiming
+Write-LogLine $log ("[OPTIONS] plan {0}, MTP {1}, prefetch {2}, timing {3}, op offload {4}, threads {5}, ubatch {6}" -f $Plan,
+    $(if ($useMtp) { "on (draft max $draftMax)" } else { "off" }), $(if ($usePrefetch) { "on" } else { "off" }),
+    $(if ($useTiming) { "on" } else { "off" }), $(if ($useOffload) { "on" } else { "off" }),
+    $(if ($threadsA -gt 0) { $threadsA } else { "default" }), $ubatch) "Cyan"
+if ($useMtp -and !$p.mtp_block) {
+    Write-LogLine $log "[NOTE] plan '$Plan' leaves no room for the MTP block on C's GPU; Gate 2 will likely refuse it. Use -Plan balanced-mtp or tight-mtp." "Yellow"
+}
+
 # ---- arguments shared by the projection and the server --------------------------------------------
 if ((($p.ts | Measure-Object -Sum).Sum) -ne $p.ngl) {
     Write-LogLine $log ("[FAIL] plan '{0}': sum of ts ({1}) must equal ngl ({2}), otherwise layers shift between devices." -f $Plan, ($p.ts -join ","), $p.ngl) "Red"
@@ -123,7 +152,7 @@ $common = @(
     "-ngl", "$($p.ngl)",
     "-ts", ($p.ts -join ","),
     "-c", "$($cfg.model.ctx)",
-    "-ub", "$($cfg.model.ubatch)",
+    "-ub", "$ubatch",
     "-np", "1",
     "--fit", "off",
     "-fitt", ($p.fit_margin_mib -join ","),
@@ -133,8 +162,15 @@ $common = @(
 )
 # op offload copies whole CPU-resident expert tensors (up to 1.3 GiB each) into the 4090 compute buffer
 # during prompt processing; keep it off for the first runs so VRAM use stays predictable
-if (!$OpOffload) {
+if (!$useOffload) {
     $common += @("--no-op-offload")
+}
+if ($threadsA -gt 0) {
+    $common += @("-t", "$threadsA")
+}
+# the projection must load the MTP block too, so the server's own check sees the same plan
+if ($useMtp) {
+    $common += @("--spec-type", "draft-mtp")
 }
 
 # ---- Gate 2: projected memory of the real model on every device ----------------------------------
@@ -160,6 +196,9 @@ $server = $common + @(
     "--log-file", $serverLog,
     "--log-timestamps"
 )
+if ($useMtp) {
+    $server += @("--spec-draft-n-max", "$draftMax")
+}
 Write-LogLine $log ("Starting llama-server on http://{0}:{1}, server log: {2}" -f $cfg.stage_a.api_host, $cfg.stage_a.api_port, $serverLog) "Green"
 Write-LogLine $log "First load sends about 56 GiB to the workers (about 8-10 min on 1 GbE); later loads use the worker caches. Then run .\smoke-test.ps1 in a second window." "Yellow"
 Add-Content -Path $log -Value ("{0} >>> llama-server.exe {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"), ($server -join " ")) -Encoding UTF8

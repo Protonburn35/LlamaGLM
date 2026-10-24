@@ -1473,11 +1473,13 @@ private:
         uint64_t sent_bytes  = 0; // tensor data sent to the client
         uint64_t n_graphs    = 0;
         uint64_t n_nodes     = 0;
+        uint64_t busy_us     = 0; // graph compute time, measured with GGML_RPC_SERVER_PROFILE=1
         uint64_t recv_report = 0; // recv_bytes + cache_bytes at the last progress line
     };
 
     void init_stats();
     void report_stats(bool force);
+    void compute_graph(uint32_t device, ggml_cgraph * graph);
     dev_stats * buffer_stats(ggml_backend_buffer_t buffer);
 
     void sync_all_backends();
@@ -1506,6 +1508,9 @@ private:
     std::unordered_map<ggml_backend_buffer_t, uint32_t> buffer_dev;
     std::vector<dev_stats> stats;
     std::vector<size_t> reserve;   // bytes that must stay free on each device (GGML_RPC_SERVER_RESERVE_MIB)
+    bool profile    = false;       // GGML_RPC_SERVER_PROFILE=1: synchronize after each graph and report its compute time
+    bool local_copy = false;       // GGML_RPC_SERVER_LOCAL_COPY=1: copy between devices of this server through host memory
+    std::vector<uint8_t> copy_buf;
     std::vector<size_t> free_base; // free memory of each device when the client connected
     std::chrono::steady_clock::time_point t_report;
     // computed graphs cached per backend, keyed by uid
@@ -1518,6 +1523,11 @@ void rpc_server::init_stats() {
     reserve.assign(backends.size(), 0);
     free_base.assign(backends.size(), 0);
     t_report = std::chrono::steady_clock::now();
+
+    const char * env_profile = getenv("GGML_RPC_SERVER_PROFILE");
+    profile = env_profile != nullptr && atoi(env_profile) != 0;
+    const char * env_local_copy = getenv("GGML_RPC_SERVER_LOCAL_COPY");
+    local_copy = env_local_copy != nullptr && atoi(env_local_copy) != 0;
 
     // GGML_RPC_SERVER_RESERVE_MIB: one value for all devices or one value per device, e.g. "1024,6144"
     const char * env = getenv("GGML_RPC_SERVER_RESERVE_MIB");
@@ -1563,11 +1573,28 @@ void rpc_server::report_stats(bool force) {
         if (s.recv_bytes + s.cache_bytes == 0 && s.n_graphs == 0 && s.n_alloc_err == 0) {
             continue;
         }
-        LOG_INFO("[stats] device %zu (%s): buffers %.2f GiB (peak %.2f GiB, %" PRIu64 " refused), received %.2f GiB, from cache %.2f GiB, sent %.2f MiB, graphs %" PRIu64 " (%" PRIu64 " nodes)\n",
+        char busy[64] = "";
+        if (profile && s.n_graphs > 0) {
+            snprintf(busy, sizeof(busy), ", busy %.1f ms/graph", s.busy_us/1000.0/s.n_graphs);
+        }
+        LOG_INFO("[stats] device %zu (%s): buffers %.2f GiB (peak %.2f GiB, %" PRIu64 " refused), received %.2f GiB, from cache %.2f GiB, sent %.2f MiB, graphs %" PRIu64 " (%" PRIu64 " nodes)%s\n",
                  i, ggml_backend_name(backends[i]), s.alloc_size/1073741824.0, s.alloc_peak/1073741824.0, s.n_alloc_err,
-                 s.recv_bytes/1073741824.0, s.cache_bytes/1073741824.0, s.sent_bytes/1048576.0, s.n_graphs, s.n_nodes);
+                 s.recv_bytes/1073741824.0, s.cache_bytes/1073741824.0, s.sent_bytes/1048576.0, s.n_graphs, s.n_nodes, busy);
         s.recv_report = s.recv_bytes + s.cache_bytes;
     }
+}
+
+void rpc_server::compute_graph(uint32_t device, ggml_cgraph * graph) {
+    const int64_t t0 = profile ? ggml_time_us() : 0;
+    ggml_status status = ggml_backend_graph_compute_async(backends[device], graph);
+    GGML_ASSERT(status == GGML_STATUS_SUCCESS && "Unsuccessful graph computations are not supported with RPC");
+    if (profile) {
+        ggml_backend_synchronize(backends[device]);
+        stats[device].busy_us += ggml_time_us() - t0;
+    }
+    stats[device].n_graphs++;
+    stats[device].n_nodes += graph->n_nodes;
+    report_stats(false);
 }
 
 rpc_server::dev_stats * rpc_server::buffer_stats(ggml_backend_buffer_t buffer) {
@@ -2213,6 +2240,13 @@ bool rpc_server::copy_tensor(const rpc_msg_copy_tensor_req & request, rpc_msg_co
     LOG_DBG2("[%s] src: %s -> dst: %s\n", __func__, rpc_log_format_tensor(src).c_str(), rpc_log_format_tensor(dst).c_str());
 
     response.result = ggml_backend_buffer_copy_tensor(src, dst);
+    if (!response.result && local_copy && ggml_are_same_layout(src, dst)) {
+        // the backends cannot copy directly (e.g. CPU to CUDA): stage the data here instead of through the client
+        copy_buf.resize(src_size);
+        ggml_backend_tensor_get(src, copy_buf.data(), 0, src_size);
+        ggml_backend_tensor_set(dst, copy_buf.data(), 0, src_size);
+        response.result = 1;
+    }
     return true;
 }
 
@@ -2357,12 +2391,8 @@ bool rpc_server::graph_compute(const std::vector<uint8_t> & input) {
     }
     const std::chrono::duration<double, std::milli> deserialize_ms = std::chrono::steady_clock::now() - t_deserialize;
 
-    ggml_status status = ggml_backend_graph_compute_async(backends[device], graph);
-    GGML_ASSERT(status == GGML_STATUS_SUCCESS && "Unsuccessful graph computations are not supported with RPC");
+    compute_graph(device, graph);
     sg.graph = graph;
-    stats[device].n_graphs++;
-    stats[device].n_nodes += n_nodes;
-    report_stats(false);
     LOG_DBG3("[%s] device: %u, graph build: %.3f ms\n", __func__, device, deserialize_ms.count());
     return true;
 }
@@ -2379,11 +2409,7 @@ bool rpc_server::graph_recompute(const rpc_msg_graph_recompute_req & request) {
     }
     ggml_cgraph * graph = it->second.graph;
     LOG_DBG("[%s] device: %u, uid: %" PRIu64 "\n", __func__, device, request.uid);
-    ggml_status status = ggml_backend_graph_compute_async(backends[device], graph);
-    GGML_ASSERT(status == GGML_STATUS_SUCCESS && "Unsuccessful graph computations are not supported with RPC");
-    stats[device].n_graphs++;
-    stats[device].n_nodes += graph->n_nodes;
-    report_stats(false);
+    compute_graph(device, graph);
     return true;
 }
 

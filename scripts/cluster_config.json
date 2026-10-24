@@ -1,5 +1,5 @@
 {
-  "version": "0.8.1",
+  "version": "0.8.2",
   "model": {
     "dir": "C:\\GLM-5.3-Flash\\UD-IQ3_XXS",
     "first_shard": "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
@@ -14,7 +14,8 @@
     "description": "RTX 4090 24 GB coordinator + API",
     "host": "192.168.50.206",
     "api_host": "127.0.0.1",
-    "api_port": 8082
+    "api_port": 8081,
+    "threads": 0
   },
   "stage_b": {
     "description": "RTX 4060 Laptop 8 GB",
@@ -38,6 +39,16 @@
     "cache_need_gib": 32,
     "expect_gib": ["14:17", "24:40"]
   },
+  "options": {
+    "note": "all experiments are off here; a launcher switch turns one on for a single run (see FIRST-RUN.md section 5)",
+    "mtp": false,
+    "mtp_draft_max": 1,
+    "moe_prefetch": false,
+    "timing": false,
+    "op_offload": false,
+    "worker_timing": false,
+    "worker_local_copy": false
+  },
   "rpc_device_names": {
     "RPC0": "Stage B GPU (RTX 4060 Laptop)",
     "RPC1": "Stage B RAM",
@@ -46,33 +57,83 @@
   },
   "profiles": {
     "balanced": {
-      "note": "default: uses the RAM of all three PCs, about 15 GiB of Stage A weights are paged from its SSD",
-      "ngl": 31,
+      "note": "default: the split that ran on 2026-10-24; about 40 GiB of Stage A weights are mapped from its SSD",
+      "ngl": 29,
       "devices": ["CUDA0", "RPC1", "RPC0", "RPC3", "RPC2"],
-      "ts": [7, 8, 2, 8, 6],
+      "ts": [7, 7, 2, 7, 6],
       "fit_margin_mib": [1536, 2560, 512, 2560, 1024],
+      "mtp_block": false,
       "layers": {
-        "A RAM (mmap)": "0-15, 35.13 GiB incl. token_embd",
-        "A RTX 4090 (CUDA0)": "16-22, 17.77 GiB",
-        "B RAM (RPC1)": "23-30, 20.31 GiB",
-        "B RTX 4060 (RPC0)": "31-32, 5.08 GiB",
-        "C RAM (RPC3)": "33-40, 20.31 GiB",
-        "C RTX 5070 Ti (RPC2)": "41-44 + NextN slot 45 (not loaded) + output, 10.87 GiB"
+        "A RAM (mmap)": "0-17, 40.2 GiB incl. token_embd",
+        "A RTX 4090 (CUDA0)": "18-24, 17.8 GiB",
+        "B RAM (RPC1)": "25-31, 17.8 GiB",
+        "B RTX 4060 (RPC0)": "32-33, 5.1 GiB",
+        "C RAM (RPC3)": "34-40, 17.8 GiB",
+        "C RTX 5070 Ti (RPC2)": "41-44 + output, NextN slot 45 not loaded, 10.9 GiB"
+      }
+    },
+    "balanced-mtp": {
+      "note": "room for the MTP block on C's GPU: one more layer on Stage A; use it for MTP off/on comparisons",
+      "ngl": 28,
+      "devices": ["CUDA0", "RPC1", "RPC0", "RPC3", "RPC2"],
+      "ts": [7, 7, 2, 7, 5],
+      "fit_margin_mib": [1536, 2560, 512, 2560, 1024],
+      "mtp_block": true,
+      "layers": {
+        "A RAM (mmap)": "0-18, 42.8 GiB incl. token_embd",
+        "A RTX 4090 (CUDA0)": "19-25, 17.8 GiB",
+        "B RAM (RPC1)": "26-32, 17.8 GiB",
+        "B RTX 4060 (RPC0)": "33-34, 5.1 GiB",
+        "C RAM (RPC3)": "35-41, 17.8 GiB",
+        "C RTX 5070 Ti (RPC2)": "42-44 + NextN 45 (loaded with MTP) + output, 10.9 GiB"
+      }
+    },
+    "tight": {
+      "note": "one more layer on the 4090 (about 1.6 GiB of VRAM left at load), one less mapped from Stage A's SSD",
+      "ngl": 30,
+      "devices": ["CUDA0", "RPC1", "RPC0", "RPC3", "RPC2"],
+      "ts": [8, 7, 2, 7, 6],
+      "fit_margin_mib": [1536, 2560, 512, 2560, 1024],
+      "mtp_block": false,
+      "layers": {
+        "A RAM (mmap)": "0-16, 37.7 GiB incl. token_embd",
+        "A RTX 4090 (CUDA0)": "17-24, 20.3 GiB",
+        "B RAM (RPC1)": "25-31, 17.8 GiB",
+        "B RTX 4060 (RPC0)": "32-33, 5.1 GiB",
+        "C RAM (RPC3)": "34-40, 17.8 GiB",
+        "C RTX 5070 Ti (RPC2)": "41-44 + output, NextN slot 45 not loaded, 10.9 GiB"
+      }
+    },
+    "tight-mtp": {
+      "note": "tight with room for the MTP block on C's GPU",
+      "ngl": 29,
+      "devices": ["CUDA0", "RPC1", "RPC0", "RPC3", "RPC2"],
+      "ts": [8, 7, 2, 7, 5],
+      "fit_margin_mib": [1536, 2560, 512, 2560, 1024],
+      "mtp_block": true,
+      "layers": {
+        "A RAM (mmap)": "0-17, 40.2 GiB incl. token_embd",
+        "A RTX 4090 (CUDA0)": "18-25, 20.3 GiB",
+        "B RAM (RPC1)": "26-32, 17.8 GiB",
+        "B RTX 4060 (RPC0)": "33-34, 5.1 GiB",
+        "C RAM (RPC3)": "35-41, 17.8 GiB",
+        "C RTX 5070 Ti (RPC2)": "42-44 + NextN 45 (loaded with MTP) + output, 10.9 GiB"
       }
     },
     "laptop-light": {
-      "note": "laptop runs only 3 layers (2 KDA-only on its GPU); Stage A pages about 30 GiB from its SSD, much slower",
+      "note": "laptop runs only 3 layers (2 KDA-only on its GPU); Stage A pages about 30 GiB from its SSD, much slower; not tested on the PCs",
       "ngl": 25,
       "devices": ["CUDA0", "RPC0", "RPC1", "RPC3", "RPC2"],
       "ts": [7, 2, 1, 9, 6],
       "fit_margin_mib": [1536, 512, 2560, 2560, 1024],
+      "mtp_block": false,
       "layers": {
-        "A RAM (mmap)": "0-21, 50.37 GiB incl. token_embd",
-        "A RTX 4090 (CUDA0)": "22-28, 17.77 GiB",
-        "B RTX 4060 (RPC0)": "29-30, 5.08 GiB, KDA only",
-        "B RAM (RPC1)": "31, 2.54 GiB",
-        "C RAM (RPC3)": "32-40, 22.85 GiB",
-        "C RTX 5070 Ti (RPC2)": "41-44 + NextN slot 45 (not loaded) + output, 10.87 GiB"
+        "A RAM (mmap)": "0-21, 50.4 GiB incl. token_embd",
+        "A RTX 4090 (CUDA0)": "22-28, 17.8 GiB",
+        "B RTX 4060 (RPC0)": "29-30, 5.1 GiB, KDA only",
+        "B RAM (RPC1)": "31, 2.5 GiB",
+        "C RAM (RPC3)": "32-40, 22.9 GiB",
+        "C RTX 5070 Ti (RPC2)": "41-44 + output, NextN slot 45 not loaded, 10.9 GiB"
       }
     }
   }

@@ -4,7 +4,7 @@ The step-by-step run is in `FIRST-RUN.md`. This page lists what each PC needs.
 
 ## All three PCs
 - Windows 11 x64, NVIDIA driver R570 or newer. (The optional `-BinDir` reference build of llama.cpp b11780 with CUDA 13.4 needs R580 or newer.)
-- `C:\LlamaGLM` = contents of `LlamaGLM-v0.8.1-win-cuda-cu12.8-sm89-sm120-x64.zip`. Same version on all PCs; remove older versions first. `MANIFEST.txt` lists the SHA-256 of every file (`Get-FileHash <file> -Algorithm SHA256`).
+- `C:\LlamaGLM` = contents of `LlamaGLM-v0.8.2-win-cuda-cu12.8-sm89-sm120-x64.zip`. Same version on all PCs; remove older versions first. `MANIFEST.txt` lists the SHA-256 of every file (`Get-FileHash <file> -Algorithm SHA256`).
 - NVIDIA Control Panel: "CUDA - Sysmem Fallback Policy" = "Prefer No Sysmem Fallback".
 - PowerShell may need `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` and `Get-ChildItem C:\LlamaGLM\*.ps1 | Unblock-File`.
 - `cluster_config.json` must be identical on all PCs (addresses, ports).
@@ -27,7 +27,7 @@ The step-by-step run is in `FIRST-RUN.md`. This page lists what each PC needs.
 - Fixed IP addresses (router DHCP reservation) avoid editing `cluster_config.json`.
 
 ## Package contents
-`llama-server.exe`, `ggml-rpc-server.exe`, `llama-fit-params.exe` (Gate 2), `llama-rpc-test.exe` (Gate 1), `test-backend-ops.exe` (CUDA self-test), `llama-cli.exe`, `llama-bench.exe`, `llama-gguf-split.exe`, the ggml/llama DLLs (`ggml-cuda.dll` with sm_89 + sm_120a code), CUDA 12.8 runtime DLLs, the Microsoft Visual C++ runtime DLLs, the launchers (`start-stage-a.ps1`, `start-stage-b.ps1`, `start-stage-c.ps1`, `start-worker.ps1`, `smoke-test.ps1`, `collect-logs.ps1`, `llamaglm-common.ps1`), `cluster_config.json`, `MANIFEST.txt` (source commit and file hashes), docs.
+`llama-server.exe`, `ggml-rpc-server.exe`, `llama-fit-params.exe` (Gate 2), `llama-rpc-test.exe` (Gate 1), `test-backend-ops.exe` (CUDA self-test), `llama-cli.exe`, `llama-bench.exe`, `llama-gguf-split.exe`, the ggml/llama DLLs (`ggml-cuda.dll` with sm_89 + sm_120a code), CUDA 12.8 runtime DLLs, the Microsoft Visual C++ runtime DLLs, the launchers (`start-stage-a.ps1`, `start-stage-b.ps1`, `start-stage-c.ps1`, `start-worker.ps1`, `smoke-test.ps1`, `collect-logs.ps1`, `perf-log.ps1`, `llamaglm-common.ps1`), `cluster_config.json`, `MANIFEST.txt` (source commit and file hashes), docs.
 
 Logs go to `C:\LlamaGLM\logs` on each PC.
 

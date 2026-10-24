@@ -165,4 +165,21 @@ function Clear-UnsafeEnv {
             Write-LogLine $LogPath "[INFO] removed environment variable $name for this session" "DarkGray"
         }
     }
+    # the launchers pass every llama.cpp setting on the command line; a leftover LLAMA_ARG_* variable
+    # would change the server but not the Gate 2 projection
+    foreach ($v in @(Get-ChildItem env: | Where-Object { $_.Name -like "LLAMA_ARG_*" })) {
+        Remove-Item ("env:" + $v.Name)
+        Write-LogLine $LogPath "[INFO] removed environment variable $($v.Name) for this session (use the launcher switches)" "DarkGray"
+    }
+}
+
+# turn an opt-in environment variable on, or remove it so that an earlier session cannot leave it on
+function Set-OptionalEnv {
+    param([string]$LogPath, [string]$Name, [bool]$Enabled)
+    if ($Enabled) {
+        Set-Item "env:$Name" "1"
+    } elseif (Test-Path "env:$Name") {
+        Remove-Item "env:$Name"
+        Write-LogLine $LogPath "[INFO] removed environment variable $Name for this session (option off)" "DarkGray"
+    }
 }

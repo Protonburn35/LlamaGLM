@@ -71,13 +71,13 @@ jobs:
           $crt = & $vswhere -latest -find 'VC\Redist\MSVC\**\x64\Microsoft.VC14*.CRT\vcruntime140.dll' | Where-Object { $_ -notmatch '\\onecore\\' } | Sort-Object -Descending | Select-Object -First 1
           if (!$crt) { throw 'MSVC runtime not found' }
           Copy-Item (Join-Path (Split-Path $crt) '*.dll') $pkg
-          foreach ($f in @('llamaglm-common.ps1', 'start-stage-a.ps1', 'start-worker.ps1', 'start-stage-b.ps1', 'start-stage-c.ps1', 'smoke-test.ps1', 'collect-logs.ps1', 'cluster_config.json')) {
+          foreach ($f in @('llamaglm-common.ps1', 'start-stage-a.ps1', 'start-worker.ps1', 'start-stage-b.ps1', 'start-stage-c.ps1', 'smoke-test.ps1', 'collect-logs.ps1', 'perf-log.ps1', 'cluster_config.json')) {
             Copy-Item "scripts/$f" $pkg
           }
           foreach ($f in @('INSTALL-WINDOWS.md', 'FIRST-RUN.md', 'README.md', 'HANDOFF.md', 'LIMITATIONS.md')) {
             Copy-Item $f $pkg
           }
-          foreach ($f in @('ARCHITECTURE', 'BUILD_LOG', 'BUILD_MATRIX', 'CI_SCOPE', 'DECISIONS', 'DEEPSEEKRPC_LESSONS', 'MEMORY_PLAN', 'NUMERICAL_FIDELITY', 'OPEN_ISSUES', 'REVIEW-v0.8.0', 'RPC_PROTOCOL', 'TEST_REPORT', 'UPSTREAM_AUDIT')) {
+          foreach ($f in @('ARCHITECTURE', 'BUILD_LOG', 'BUILD_MATRIX', 'CI_SCOPE', 'DECISIONS', 'DEEPSEEKRPC_LESSONS', 'HARDWARE_HANDOFF-2026-10-24', 'MEMORY_PLAN', 'NUMERICAL_FIDELITY', 'OPEN_ISSUES', 'REVIEW-v0.8.0', 'RPC_PROTOCOL', 'SPEED_RESEARCH-2026-10-24', 'TEST-PLAN-v0.8.2', 'TEST_REPORT', 'UPSTREAM_AUDIT')) {
             Copy-Item "docs/$f.md" (Join-Path $pkg 'docs')
           }
 

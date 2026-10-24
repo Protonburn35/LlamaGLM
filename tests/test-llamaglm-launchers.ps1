@@ -41,3 +41,19 @@ try {
 } finally {
     Remove-Item -LiteralPath $testDir -Recurse -Force
 }
+
+# every plan must place each slot exactly once and be selectable; every experiment must default to off
+$cfg = Get-LlamaGlmConfig (Join-Path $PSScriptRoot "../scripts/cluster_config.json")
+$launcher = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot "../scripts/start-stage-a.ps1"), [ref]$null, [ref]$null)
+$planParam = $launcher.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq "Plan" }
+$planNames = @($planParam.Attributes | Where-Object { $_.TypeName.Name -eq "ValidateSet" } | ForEach-Object { $_.PositionalArguments.Value })
+foreach ($plan in $cfg.profiles.PSObject.Properties) {
+    $p = $plan.Value
+    if ((($p.ts | Measure-Object -Sum).Sum) -ne $p.ngl) { throw "plan $($plan.Name): sum(ts) != ngl" }
+    if ($p.devices.Count -ne $p.ts.Count -or $p.fit_margin_mib.Count -ne $p.ts.Count) { throw "plan $($plan.Name): devices, ts and fit_margin_mib differ in length" }
+    if ($planNames -notcontains $plan.Name) { throw "plan $($plan.Name) is not in the -Plan list of start-stage-a.ps1" }
+}
+foreach ($name in @("mtp", "moe_prefetch", "timing", "op_offload", "worker_timing", "worker_local_copy")) {
+    if ($cfg.options.$name -ne $false) { throw "option $name must default to false" }
+}
+Write-Host "PASS: $(@($cfg.profiles.PSObject.Properties).Count) plans are consistent and selectable; all experiments default to off"

@@ -20,6 +20,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <algorithm>
+#include <cinttypes>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -923,6 +925,19 @@ struct ggml_backend_sched_split {
     struct ggml_cgraph graph;
 };
 
+// optional timing summary [GGML_SCHED_PROFILE], kind 0: graphs of up to 8 tokens, kind 1: larger graphs
+struct ggml_backend_sched_profile {
+    int     id;
+    int64_t n_graphs [2];
+    int64_t period_us[2];                          // from the start of a graph to the start of the next one
+    int64_t period_n [2];
+    int64_t run_us   [2][GGML_SCHED_MAX_BACKENDS]; // compute of the splits of a backend, synchronized
+    int64_t fetch_us [2][GGML_SCHED_MAX_BACKENDS]; // copies of its outputs into other splits, includes waiting for a remote backend
+    int64_t t_graph;
+    int64_t t_report;
+    int     kind;
+};
+
 struct ggml_backend_sched {
     bool is_reset; // true if the scheduler has been reset since the last graph split
     bool is_alloc;
@@ -986,6 +1001,8 @@ struct ggml_backend_sched {
     int prev_graph_size;
 
     int debug_realloc;
+
+    struct ggml_backend_sched_profile * profile;
 };
 
 #define hash_id(tensor) ggml_hash_find_or_insert(&sched->hash_set, tensor)
@@ -1862,6 +1879,87 @@ static void ggml_backend_sched_copy_input(ggml_backend_sched_t sched, struct ggm
     }
 }
 
+static void ggml_backend_sched_profile_report(ggml_backend_sched_t sched) {
+    struct ggml_backend_sched_profile * p = sched->profile;
+    static const char * kind_names[2] = { "<= 8 tokens", "> 8 tokens" };
+    for (int k = 0; k < 2; k++) {
+        if (p->n_graphs[k] == 0) {
+            continue;
+        }
+        const double n = (double) p->n_graphs[k];
+        double sum = 0.0;
+        std::string line;
+        for (int b = 0; b < sched->n_backends; b++) {
+            if (p->run_us[k][b] == 0 && p->fetch_us[k][b] == 0) {
+                continue;
+            }
+            const double run   = p->run_us[k][b]/n/1000.0;
+            const double fetch = p->fetch_us[k][b]/n/1000.0;
+            sum += run + fetch;
+            char buf[128];
+            ggml_backend_dev_t dev = ggml_backend_get_device(sched->backends[b]);
+            snprintf(buf, sizeof(buf), " | %s run %.1f fetch %.1f", dev ? ggml_backend_dev_name(dev) : ggml_backend_name(sched->backends[b]), run, fetch);
+            line += buf;
+        }
+        // rest: sampling, the output copy of the last split (including its remote compute) and the server
+        const double period = p->period_n[k] > 0 ? p->period_us[k]/(double) p->period_n[k]/1000.0 : 0.0;
+        GGML_LOG_INFO("sched_profile[%d] %s: %" PRId64 " graphs, %.1f ms/graph%s | rest %.1f (ms per graph)\n",
+            p->id, kind_names[k], p->n_graphs[k], period, line.c_str(), period > 0.0 ? period - sum : 0.0);
+    }
+    const int id = p->id;
+    const int kind = p->kind;
+    const int64_t t_graph = p->t_graph;
+    memset(p, 0, sizeof(*p));
+    p->id = id;
+    p->kind = kind;
+    p->t_graph = t_graph;
+}
+
+static void ggml_backend_sched_profile_begin(ggml_backend_sched_t sched, const struct ggml_cgraph * graph) {
+    struct ggml_backend_sched_profile * p = sched->profile;
+    const int64_t now = ggml_time_us();
+    // the time between requests is not part of a graph
+    if (p->kind >= 0 && now - p->t_graph < 10*1000000LL) {
+        p->period_us[p->kind] += now - p->t_graph;
+        p->period_n[p->kind]++;
+    }
+    if (p->t_report == 0) {
+        p->t_report = now;
+    } else if (now - p->t_report >= 30*1000000LL) {
+        ggml_backend_sched_profile_report(sched);
+        p->t_report = now;
+    }
+    // the size of the batch, from the token or embedding input of llama.cpp graphs
+    int kind = 1;
+    for (int i = 0; i < graph->n_leafs; i++) {
+        const struct ggml_tensor * t = graph->leafs[i];
+        if (strcmp(t->name, "inp_tokens") == 0) {
+            kind = t->ne[0] <= 8 ? 0 : 1;
+            break;
+        }
+        if (strcmp(t->name, "inp_embd") == 0) {
+            kind = t->ne[1] <= 8 ? 0 : 1;
+            break;
+        }
+    }
+    p->kind = kind;
+    p->t_graph = now;
+    p->n_graphs[kind]++;
+}
+
+static void ggml_backend_sched_copy_input_timed(ggml_backend_sched_t sched, struct ggml_backend_sched_split * split, struct ggml_tensor * input) {
+    if (sched->profile == NULL) {
+        ggml_backend_sched_copy_input(sched, split, input);
+        return;
+    }
+    const int64_t t0 = ggml_time_us();
+    ggml_backend_sched_copy_input(sched, split, input);
+    const int src_id = tensor_backend_id(input);
+    if (src_id >= 0) {
+        sched->profile->fetch_us[sched->profile->kind][src_id] += ggml_time_us() - t0;
+    }
+}
+
 static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t sched) {
     GGML_ASSERT(sched);
     struct ggml_backend_sched_split * splits = sched->splits;
@@ -1887,14 +1985,16 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
         // the weights in host memory are copied last, so that the copy callback can read the other inputs of the split
         for (int input_id = 0; input_id < split->n_inputs; input_id++) {
             if (!ggml_backend_sched_is_host_weight(split->inputs[input_id])) {
-                ggml_backend_sched_copy_input(sched, split, split->inputs[input_id]);
+                ggml_backend_sched_copy_input_timed(sched, split, split->inputs[input_id]);
             }
         }
         for (int input_id = 0; input_id < split->n_inputs; input_id++) {
             if (ggml_backend_sched_is_host_weight(split->inputs[input_id])) {
-                ggml_backend_sched_copy_input(sched, split, split->inputs[input_id]);
+                ggml_backend_sched_copy_input_timed(sched, split, split->inputs[input_id]);
             }
         }
+
+        const int64_t t_run = sched->profile ? ggml_time_us() : 0;
 
         if (!sched->callback_eval) {
             enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
@@ -1935,6 +2035,12 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             }
         }
 
+        // a remote backend returns once the work is sent, its compute shows up as fetch time of the next split
+        if (sched->profile) {
+            ggml_backend_synchronize(split_backend);
+            sched->profile->run_us[sched->profile->kind][split_backend_id] += ggml_time_us() - t_run;
+        }
+
         // record the event of this split
         if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
             ggml_backend_event_record(sched->events[split_backend_id][sched->cur_copy], split_backend);
@@ -1968,6 +2074,14 @@ ggml_backend_sched_t ggml_backend_sched_new(
 #endif
     const char * GGML_SCHED_DEBUG_REALLOC = getenv("GGML_SCHED_DEBUG_REALLOC");
     sched->debug_realloc = GGML_SCHED_DEBUG_REALLOC ? atoi(GGML_SCHED_DEBUG_REALLOC) : sched->debug_realloc;
+
+    const char * GGML_SCHED_PROFILE = getenv("GGML_SCHED_PROFILE");
+    if (GGML_SCHED_PROFILE && atoi(GGML_SCHED_PROFILE) != 0) {
+        static int n_profiled = 0;
+        sched->profile = (ggml_backend_sched_profile *) calloc(1, sizeof(*sched->profile));
+        sched->profile->id = n_profiled++;
+        sched->profile->kind = -1;
+    }
 
     sched->n_backends = n_backends;
     sched->n_copies = parallel ? GGML_SCHED_MAX_COPIES : 1;
@@ -2021,6 +2135,10 @@ ggml_backend_sched_t ggml_backend_sched_new(
 void ggml_backend_sched_free(ggml_backend_sched_t sched) {
     if (sched == NULL) {
         return;
+    }
+    if (sched->profile) {
+        ggml_backend_sched_profile_report(sched);
+        free(sched->profile);
     }
     for (int b = 0; b < sched->n_backends; b++) {
         for (int c = 0; c < sched->n_copies; c++) {
@@ -2125,6 +2243,10 @@ enum ggml_status ggml_backend_sched_graph_compute_async(ggml_backend_sched_t sch
         if (!ggml_backend_sched_alloc_graph(sched, graph)) {
             return GGML_STATUS_ALLOC_FAILED;
         }
+    }
+
+    if (sched->profile) {
+        ggml_backend_sched_profile_begin(sched, graph);
     }
 
     return ggml_backend_sched_compute_splits(sched);

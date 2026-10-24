@@ -5,6 +5,10 @@ param (
     [switch]$SkipSelfTest,
     [switch]$Diagnostic,
     [int]$Restarts = 3,
+    # report the compute time of each device in the [stats] lines (GGML_RPC_SERVER_PROFILE)
+    [switch]$Timing,
+    # copy between this PC's RAM and GPU locally instead of through Stage A (GGML_RPC_SERVER_LOCAL_COPY)
+    [switch]$LocalCopy,
     # folder with ggml-rpc-server.exe, e.g. the official llama.cpp b11780 CUDA build
     [string]$BinDir = $PSScriptRoot,
     [string]$ConfigPath = (Join-Path $PSScriptRoot "cluster_config.json")
@@ -63,6 +67,14 @@ if ($drive.Free / 1GB -lt $w.cache_need_gib) {
 
 # 5. refuse allocations that would leave less than this free on the GPU / in RAM (GGML_RPC_SERVER_RESERVE_MIB)
 $env:GGML_RPC_SERVER_RESERVE_MIB = $w.reserve_mib
+
+# 6. optional experiments, off unless a switch or "options" in cluster_config.json turns them on
+$opt = $cfg.options
+$useTiming    = $Timing -or ($opt -and $opt.worker_timing)
+$useLocalCopy = $LocalCopy -or ($opt -and $opt.worker_local_copy)
+Set-OptionalEnv $log "GGML_RPC_SERVER_PROFILE" $useTiming
+Set-OptionalEnv $log "GGML_RPC_SERVER_LOCAL_COPY" $useLocalCopy
+Write-LogLine $log ("[OPTIONS] timing {0}, local copy {1}" -f $(if ($useTiming) { "on" } else { "off" }), $(if ($useLocalCopy) { "on" } else { "off" })) "Cyan"
 $threads = $w.threads
 if ($threads -le 0) {
     $threads = [int]((Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum)

@@ -1,6 +1,8 @@
 # LlamaGLM v0.8.1 - limitations
 
-Status: built, **not yet run on the three PCs**. All speed figures below are **estimates from bandwidth arithmetic** (real tensor sizes from the GGUF headers, published bandwidth of the parts). They are not measurements. The first real run (`smoke-test.ps1`) replaces them.
+**2026-10-24 evidence update:** v0.8.1 has completed real requests on the three PCs. Read the [hardware results and optimization handoff](docs/HARDWARE_HANDOFF-2026-10-24.md): logged prefill was 3.42/3.63 tok/s and generation was 1.71/1.90 tok/s without/with MTP on different placements. The user observed little decode SSD activity and no apparent network saturation in either phase. MTP has now executed; explicit experimental controls and matching fit/startup settings remain work to assess.
+
+The numerical projections and hardware ceilings below are **historical planning estimates**, based on bandwidth arithmetic and the original 31-layer plan, not measured limits on the user's PCs. Do not treat network bandwidth, SSD paging, or RPC latency as an established bottleneck without measurements. Use the linked hardware results and user requirements when deciding what to optimize; the historical assumptions and conclusions below may need revision.
 
 Each limitation is marked:
 - **HW** = hardware limit: no software on these three PCs can remove it.

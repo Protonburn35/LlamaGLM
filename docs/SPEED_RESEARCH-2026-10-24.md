@@ -12,7 +12,7 @@ Research only: no code or configuration was changed. Inputs: the user's `Llamagl
 | MTP drafting | 4.3 s for 227 drafts (19 ms each, about 2% of generation time) | same |
 | Graph splits / reallocations | 6 splits, 0 reallocations | both |
 | Network per token | about 1.8 MiB (B CPU 0.38, B GPU 0.38, C CPU 0.38, C GPU 0.62 MiB including logits); 25 Mbps at 1.7 tok/s, about 15 ms/token of 1 GbE time | worker `[stats]` deltas |
-| A memory | 31.9 GiB RAM, 22.5 GiB free before load; **41.2 GiB** of weights memory-mapped from the SSD (43.8 GiB in the MTP plan) | server memory breakdown |
+| A memory | 31.1 GiB RAM, 22.0 GiB free before load; **40.2 GiB** of weights memory-mapped from the SSD (42.8 GiB in the MTP plan); corrected 2026-10-25, the first version read MiB as GiB/1000 | server memory breakdown |
 | Free after load | A GPU 4.1, B RAM 4.8, B GPU 0.56, C RAM 5.6, C GPU 3.15 GiB | baseline shutdown breakdown |
 | Decode stalls | every 15-30 s a 3-s window drops to 0.6-1.2 tok/s | `tg_3s` lines |
 
@@ -24,18 +24,18 @@ The baseline and MTP runs give a rough cost model: a step with n tokens costs ab
 
 V is the work that grows with the number of tokens, which in decode is mostly the routed experts each token selects: 68.5 MiB per MoE layer, about 1.03 GiB per token in A's CPU layers 3-17 and 0.47 GiB each in B's and C's RAM layers. Read from RAM at dual-channel DDR5 speed (about 60 GB/s), that is roughly 35-50 ms, not 364 ms. The effective rate is about 5 GB/s.
 
-The most likely cause is **A paging experts from its SSD**. A maps 41.2 GiB of weights with at most about 20 GiB of page cache, so roughly half of its 36 GiB of routed experts cannot stay resident, and every token touches some that are not. Windows serves those through page faults of about 32 KiB each ([Raymond Chen](https://devblogs.microsoft.com/oldnewthing/20160909-00/?p=94285%2F)). In the upstream disk-offload discussion, a Windows/CUDA user measured 377 MB/s for MoE experts through mmap paging against 2.80 GB/s with 16 MiB overlapped reads ([llama.cpp discussion #23324](https://github.com/ggml-org/llama.cpp/discussions/23324)). At a few hundred MB/s, 130-350 MiB of non-resident experts per token explains V. It also explains the user's observation that the SSD was "not hit hard": small dependent faults leave a fast NVMe mostly idle while the CPU waits.
+The most likely cause is **A paging experts from its SSD**. A maps 40.2 GiB of weights with at most about 20 GiB of page cache, so roughly half of its 36 GiB of routed experts cannot stay resident, and every token touches some that are not. Windows serves those through page faults of about 32 KiB each ([Raymond Chen](https://devblogs.microsoft.com/oldnewthing/20160909-00/?p=94285%2F)). In the upstream disk-offload discussion, a Windows/CUDA user measured 377 MB/s for MoE experts through mmap paging against 2.80 GB/s with 16 MiB overlapped reads ([llama.cpp discussion #23324](https://github.com/ggml-org/llama.cpp/discussions/23324)). At a few hundred MB/s, 130-350 MiB of non-resident experts per token explains V. It also explains the user's observation that the SSD was "not hit hard": small dependent faults leave a fast NVMe mostly idle while the CPU waits.
 
 F (about 221 ms) covers the non-routed weights computed on CPUs (about 2.6 GiB/token on A, 0.9 GiB each on B and C), many small hyper-connection ops, the RPC round trips and about 15 ms of network transfer. It is larger than the bandwidth estimate (about 110 ms), so CPU kernel efficiency or extra faults on A may also contribute. Only profiling can split it.
 
 ### Prefill
 
-A 203-token ubatch selects 1,624 experts per layer and touches about 287 of the 288 experts in every MoE layer. A therefore reads its whole 41 GiB mapped set per ubatch, and at least 19 GiB of it cannot be resident: at 0.4-1 GB/s that alone is 20-50 s of the measured 56 s. CPU compute of 32 CPU-resident layers (about 8 TFLOP for 203 tokens, estimate) is the other part. Prefill is not limited by the network.
+A 203-token ubatch selects 1,624 experts per layer and touches about 287 of the 288 experts in every MoE layer. A therefore reads its whole 40 GiB mapped set per ubatch, and at least 19 GiB of it cannot be resident: at 0.4-1 GB/s that alone is 20-50 s of the measured 56 s. CPU compute of 32 CPU-resident layers (about 8 TFLOP for 203 tokens, estimate) is the other part. Prefill is not limited by the network.
 
 ### What it is not
 
 - **Network bandwidth:** about 15 ms of 586 ms per token.
-- **RPC latency:** 6 splits and a few blocking round trips per token. `TCP_NODELAY` is set on both ends (`ggml/src/ggml-rpc/transport.cpp`), so Windows delayed-ACK stalls do not apply.
+- **RPC latency:** 6 splits and a few blocking round trips per token. *Corrected by [SPEED_RESEARCH-2026-10-25.md](SPEED_RESEARCH-2026-10-25.md): with the fused HC post disabled, each device boundary copies 18 tensors, about 90 blocking round trips (about 54 ms) per token.* `TCP_NODELAY` is set on both ends (`ggml/src/ggml-rpc/transport.cpp`), so Windows delayed-ACK stalls do not apply.
 - **Graph rebuilds:** zero reallocations.
 - **MTP drafting:** 2% of time.
 - **The laptop's bandwidth alone:** B's 7 RAM layers carry 0.47 GiB of routed experts per token, a small share of 586 ms unless B is paging (check below).

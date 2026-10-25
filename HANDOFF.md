@@ -48,6 +48,8 @@ Package run [40188091530](https://github.com/Protonburn35/LlamaGLM/actions/runs/
 - `-ChunkedLoad` (B, C) sets `GGML_RPC_SERVER_CHUNKED_LOAD=1`, and `rpc_server::set_tensor_hash` then reads cached files in 64 MiB pieces. A local test with the cache threshold lowered to 256 KiB and 100 KB pieces loaded every tensor from the cache and generated text identical to the plain run.
 - `-MoeCacheMib` below 4096 now warns.
 
+Package run [40202088082](https://github.com/Protonburn35/LlamaGLM/actions/runs/40202088082) at `e1091bf` passed all checks (Gate 1, 8 reserve cases, launcher tests with 8 plans under PowerShell 5.1). Artifact `LlamaGLM-v0.8.4-win-cuda-cu12.8-sm89-sm120-x64`, 615,257,503-byte zip, SHA-256 `d827e52ba94c1dad453a1b51a3a20dd4b3307ae99ae5ae880af4c172b5b31377`, expires 2026-11-24. Not yet run on the PCs.
+
 **v0.8.3 hardware test (2026-10-25, [results](docs/TEST-RESULTS-v0.8.3.md)):**
 - **Speed:** `-FusedHc` 462 ms/token against 549 baseline; `relief` 435 ms and half of A's SSD reads; `tight-mtp -Mtp` 2.79 tok/s, the best so far.
 - **GPU clocks:** all three GPUs stay at P8/P5 with memory clocks at 405-810 MHz while generating, which explains the slow GPU layers. Next step: lock clocks (`-LockClocks`, proposed for v0.8.4).

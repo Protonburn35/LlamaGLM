@@ -88,7 +88,7 @@ Only "Gate 4 PASS" means the model generated text across the three PCs. Expect i
 | `gpu-attn` (experimental) | routed experts of 3-18, about 39 GiB | 0-24 except those experts | 25-31 | 32-33 | 34-40 | 41-44 + output |
 | `laptop-light` (not tested) | 0-21, 50.4 GiB | 22-28 | 31 | 29-30 (KDA only) | 32-40 | 41-44 + output |
 
-`tight` and `relief` leave about 1.6 GiB of the 4090 free at load; Gate 2 refuses them if a desktop program uses more VRAM. `relief` also needs about 24.1 GiB free in C's RAM at load. In `gpu-attn` the 4090 runs everything of layers 0-24 except the routed experts of layers 0-18, which the 7800X3D computes from its RAM. MTP needs a plan whose name ends in `-mtp` (room for the MTP block on C's GPU).
+`tight` and `relief` leave about 1.6 GiB of the 4090 free at load; Gate 2 refuses them if a desktop program uses more VRAM. `relief` also needs about 24050 MiB (23.5 GiB) free in C's RAM at load; Gate 2 prints the free memory in MiB. In `gpu-attn` the 4090 runs everything of layers 0-24 except the routed experts of layers 0-18, which the 7800X3D computes from its RAM. MTP needs a plan whose name ends in `-mtp` (room for the MTP block on C's GPU).
 
 Experiments (all off by default; a switch turns one on for one run, or set it in the `options` block of `cluster_config.json`):
 

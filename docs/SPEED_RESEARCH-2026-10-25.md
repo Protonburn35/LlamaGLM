@@ -105,6 +105,31 @@ Not implemented:
 
 Found while testing: the v0.8.2 timing report at scheduler shutdown read device names from backends that llama.cpp frees first. It crashed in about half of the local `-Timing` runs; now the names are copied at creation.
 
+## 6. Plan after the v0.8.3 test
+
+What each result of [TEST-PLAN-v0.8.3.md](TEST-PLAN-v0.8.3.md) leads to:
+
+| Result | Next step |
+|---|---|
+| `-FusedHc` lowers the fetch overhead (about 45 ms expected) and GPU times, with normal answers | make it the default in the launchers, keeping a switch to turn it off |
+| `gpu-*.csv` shows low clocks or a high pstate number during generation, and "Prefer maximum performance" fixes it | make it a setup step in FIRST-RUN.md |
+| GPU layers still take several ms each with the fused op and full clocks | add per-op CUDA timing (opt-in, events around each node with CUDA graphs off) to find the slow kernels |
+| `-NoCudaGraphs` does not change the 4090's time | find out why graphs do not apply (the `GGML_CUDA_GRAPH_DEBUG` log with `-v`) |
+| `slowest graph` puts the stalls in A's CPU split | treat them as memory pressure on A: `relief`, then option 6 |
+| `gpu-attn` is faster | adopt it; tune `n_cpu_moe` and the MoE cache size |
+| `relief` passes Gate 2 and is faster | make it the default plan |
+
+### Option 6 sketch: expert reads managed by llama.cpp on A
+
+The largest remaining item if paging stays the main cost.
+
+- **Cache:** a fixed RAM cache of expert slabs, for example 16-18 GiB, organized like upstream `llama-moe-cache`: an SLRU keyed by (layer, expert), with a slot map read by `get_rows`.
+- **Reads:** misses are read straight from the GGUF file with overlapped, unbuffered I/O, several MiB per request and 16 or more requests in flight. They do not go through mmap page faults.
+- **Compute:** the CPU `MUL_MAT_ID` reads the slots through views, as the GPU cache does for its banks.
+- **Memory:** the mapped expert pages are never touched, so Windows does not need to keep them resident.
+- **Expected gain (estimate):** the 165 MB/token of misses at 2-3 GB/s takes 55-80 ms instead of about 150 ms. The prompt's 16 GiB takes 6-8 s instead of about 30 s.
+- **Cost:** several hundred lines and a Windows I/O path; testable on Linux with threads and `pread`. A cheaper variant is prefetch from several threads (option 10), but Windows may drop prefetch hints at A's free-memory level.
+
 ## Sources
 
 - Engine source: `src/llama-context.cpp` (`resolve_fused_ops`), `src/models/glm5-next.cpp` (HC pre/post, DSA selection), `ggml/src/ggml-backend.cpp` (split inputs, `ggml_backend_tensor_copy`), `ggml/src/ggml-rpc/ggml-rpc.cpp` (`cpy_tensor`, `GRAPH_RECOMPUTE`), `ggml/src/ggml-cuda/ggml-cuda.cu` (CUDA graph warmup and reuse).

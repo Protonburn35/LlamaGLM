@@ -39,6 +39,12 @@ Local checks on the tiny GLM5-next fixture over two RPC workers:
 
 Package run [40188091530](https://github.com/Protonburn35/LlamaGLM/actions/runs/40188091530) at `d81c6ce` passed all checks: Gate 1, 8 reserve cases, launcher tests under PowerShell 5.1 with 7 plans. Artifact `LlamaGLM-v0.8.3-win-cuda-cu12.8-sm89-sm120-x64`, 615,245,887-byte zip, SHA-256 `4eeeab35b7dcc7a2e1a86348f57ccd0d226a2a56798570059251212753256e43`, expires 2026-11-24. Not yet run on the PCs. Decision table for after the test: section 6 of the 2026-10-25 research.
 
+**v0.8.3 hardware test (2026-10-25, [results](docs/TEST-RESULTS-v0.8.3.md)):**
+- **Speed:** `-FusedHc` 462 ms/token against 549 baseline; `relief` 435 ms and half of A's SSD reads; `tight-mtp -Mtp` 2.79 tok/s, the best so far.
+- **GPU clocks:** all three GPUs stay at P8/P5 with memory clocks at 405-810 MHz while generating, which explains the slow GPU layers. Next step: lock clocks (`-LockClocks`, proposed for v0.8.4).
+- **MoE cache:** `-MoeCacheMib 1024` thrashed with 0% hits.
+- **Failed starts:** the two early starts failed while the laptop loaded its RAM layers; they stopped after its page file was raised.
+
 The requested baseline is MTP off, `ngl=29`, `ts=7,7,2,7,6`, API port 8081. Claude should assess optional optimizations, explicitly including expert caching and an experimental MTP setting, and choose worthwhile work. Preserve model quality and normal nonzero-temperature sampling. Do not treat network bandwidth or RPC latency as limiting performance without measurements. The user observed low output traffic and unsaturated prefill and reports a faster same-model Strata run on the two desktops without the laptop. The detailed handoff distinguishes logged facts, user observations, existing mechanisms, and proposed experiments.
 
 The import review fixed a CUDA self-test that could pass without executing CUDA tests, worker-reserve integer overflow and invalid settings, the packaging script's nested-repository assumption, and an overly broad Clang-only shim dependency. Launcher regression checks and actual local RPC tests passed on CPU. [Review and validation](docs/REVIEW-v0.8.0.md) distinguishes these checks from the original VM reports.

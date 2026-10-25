@@ -1,5 +1,5 @@
 {
-  "version": "0.8.3",
+  "version": "0.8.4",
   "model": {
     "dir": "C:\\GLM-5.3-Flash\\UD-IQ3_XXS",
     "first_shard": "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
@@ -49,9 +49,12 @@
     "fused_hc": false,
     "cuda_graphs_off": false,
     "moe_cache_mib": 0,
+    "lock_clocks": false,
     "worker_timing": false,
     "worker_local_copy": false,
-    "worker_cuda_graphs_off": false
+    "worker_cuda_graphs_off": false,
+    "worker_lock_clocks": false,
+    "worker_chunked_load": false
   },
   "rpc_device_names": {
     "RPC0": "Stage B GPU (RTX 4060 Laptop)",
@@ -138,6 +141,22 @@
         "B RTX 4060 (RPC0)": "31-32, 5.1 GiB",
         "C RAM (RPC3)": "33-40, 20.3 GiB",
         "C RTX 5070 Ti (RPC2)": "41-44 + output, NextN slot 45 not loaded, 10.9 GiB"
+      }
+    },
+    "relief-mtp": {
+      "note": "relief with room for the MTP block on C's GPU: Stage A keeps 17 layers (one more than relief, one less than tight-mtp)",
+      "ngl": 30,
+      "devices": ["CUDA0", "RPC1", "RPC0", "RPC3", "RPC2"],
+      "ts": [8, 7, 2, 8, 5],
+      "fit_margin_mib": [1536, 2560, 512, 2560, 1024],
+      "mtp_block": true,
+      "layers": {
+        "A RAM (mmap)": "0-16, 37.7 GiB incl. token_embd",
+        "A RTX 4090 (CUDA0)": "17-24, 20.3 GiB",
+        "B RAM (RPC1)": "25-31, 17.8 GiB",
+        "B RTX 4060 (RPC0)": "32-33, 5.1 GiB",
+        "C RAM (RPC3)": "34-41, 20.3 GiB",
+        "C RTX 5070 Ti (RPC2)": "42-44 + NextN 45 (loaded with MTP) + output, 10.9 GiB"
       }
     },
     "gpu-attn": {

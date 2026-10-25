@@ -20,7 +20,7 @@ Launchers: `-Prefetch`, `-Timing`, `-Mtp`, `-MtpDraftMax`, `-Threads`, `-UBatch`
 
 **2026-10-25 hardware run (v0.8.2, `-Prefetch -Timing`, balanced): 3.65 tok/s prompt, 1.77 tok/s generation.** Claude's [follow-up research](docs/SPEED_RESEARCH-2026-10-25.md) (no code changed) finds the fused DeepSeek V4 HC post disabled for the whole model by a false-positive device check at the CPU-to-4090 boundary (layer 17). The unfused fallback roughly doubles the graph (14758 nodes) and makes every device boundary copy 18 tensors instead of 2: 384 KiB per hop and about 90 synchronous RPC round trips (about 54 ms) per token. GPU layers cost 9-21 ms each, a per-node cost of unknown cause (launch overhead or clocks). A still reads about 165 MB per token from its SSD, and 19% of 3-s windows stall below 1.3 tok/s with A's CPU split as the varying part (median 1.98 against mean 1.79 tok/s). The 2026-10-24 research's memory figures had a MiB/GiB slip (A maps 40.2 GiB, not 41.2) and are corrected. Proposed v0.8.3, all opt-in: `-FusedHc` (fix the check), `nvidia-smi` clocks in `perf-log.ps1`, and a plan with one more layer each on the 4090 and C's RAM. Testable now: `-LocalCopy` on workers, `-Plan tight`, and NVIDIA "Prefer maximum performance".
 
-**v0.8.3 (current source): the 2026-10-25 fixes, all opt-in** ([test plan](docs/TEST-PLAN-v0.8.3.md)):
+**v0.8.3: the 2026-10-25 fixes, all opt-in** ([test plan](docs/TEST-PLAN-v0.8.3.md)):
 - `-FusedHc` on A sets `LLAMA_FUSED_HC_FIX=1`. In `llama_context::resolve_fused_ops`, a fused node on another device is accepted when both devices support the op, which keeps the fused HC post on and makes each device boundary copy 2 tensors instead of 18.
 - `-Timing` now also reports the slowest graph per 30-s window with run + fetch per device, and workers report the slowest graph per `[stats]` line.
 - The v0.8.2 shutdown timing report was a use-after-free: it read device names from backends llama.cpp had already freed. Names are now copied when the scheduler is created.
@@ -38,6 +38,15 @@ Local checks on the tiny GLM5-next fixture over two RPC workers:
 - All launchers parse and the launcher tests pass.
 
 Package run [40188091530](https://github.com/Protonburn35/LlamaGLM/actions/runs/40188091530) at `d81c6ce` passed all checks: Gate 1, 8 reserve cases, launcher tests under PowerShell 5.1 with 7 plans. Artifact `LlamaGLM-v0.8.3-win-cuda-cu12.8-sm89-sm120-x64`, 615,245,887-byte zip, SHA-256 `4eeeab35b7dcc7a2e1a86348f57ccd0d226a2a56798570059251212753256e43`, expires 2026-11-24. Not yet run on the PCs. Decision table for after the test: section 6 of the 2026-10-25 research.
+
+**v0.8.4 (current source), all opt-in** ([test plan](docs/TEST-PLAN-v0.8.4.md)):
+- `-LockClocks` (A, B, C) runs `scripts/gpu-clocks.ps1` elevated: memory to its highest `--query-supported-clocks` value, graphics to 75-100% of its highest. The clocks are reset in a `finally` when the server or worker exits.
+  - It runs directly in an administrator window (an SSH session of an administrator account is one) and otherwise through a UAC prompt.
+  - The result is read from the script's output file, because an elevated process may not report its exit code back.
+  - It was tested locally with a fake `nvidia-smi` (lock, memory lock refused, reset); real GPUs are untested.
+- Plan `relief-mtp`: `ngl 30`, `ts 8,7,2,8,5`.
+- `-ChunkedLoad` (B, C) sets `GGML_RPC_SERVER_CHUNKED_LOAD=1`, and `rpc_server::set_tensor_hash` then reads cached files in 64 MiB pieces. A local test with the cache threshold lowered to 256 KiB and 100 KB pieces loaded every tensor from the cache and generated text identical to the plain run.
+- `-MoeCacheMib` below 4096 now warns.
 
 **v0.8.3 hardware test (2026-10-25, [results](docs/TEST-RESULTS-v0.8.3.md)):**
 - **Speed:** `-FusedHc` 462 ms/token against 549 baseline; `relief` 435 ms and half of A's SSD reads; `tight-mtp -Mtp` 2.79 tok/s, the best so far.

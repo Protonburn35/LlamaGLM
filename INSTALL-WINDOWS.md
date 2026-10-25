@@ -4,7 +4,7 @@ The step-by-step run is in `FIRST-RUN.md`. This page lists what each PC needs.
 
 ## All three PCs
 - Windows 11 x64, NVIDIA driver R570 or newer. (The optional `-BinDir` reference build of llama.cpp b11780 with CUDA 13.4 needs R580 or newer.)
-- `C:\LlamaGLM` = contents of `LlamaGLM-v0.8.3-win-cuda-cu12.8-sm89-sm120-x64.zip`. Same version on all PCs; remove older versions first. `MANIFEST.txt` lists the SHA-256 of every file (`Get-FileHash <file> -Algorithm SHA256`).
+- `C:\LlamaGLM` = contents of `LlamaGLM-v0.8.4-win-cuda-cu12.8-sm89-sm120-x64.zip`. Same version on all PCs; remove older versions first. `MANIFEST.txt` lists the SHA-256 of every file (`Get-FileHash <file> -Algorithm SHA256`).
 - NVIDIA Control Panel: "CUDA - Sysmem Fallback Policy" = "Prefer No Sysmem Fallback".
 - PowerShell may need `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` and `Get-ChildItem C:\LlamaGLM\*.ps1 | Unblock-File`.
 - `cluster_config.json` must be identical on all PCs (addresses, ports).

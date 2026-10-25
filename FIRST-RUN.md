@@ -1,4 +1,4 @@
-# LlamaGLM first run (v0.8.3)
+# LlamaGLM first run (v0.8.4)
 
 No inference has worked on these PCs yet. This version runs cheap checks first and stops at the first problem, so a bad plan or a broken GPU kernel shows up as a clear message instead of a frozen desktop. Do the steps in order; each one stops on failure.
 
@@ -14,7 +14,7 @@ Only PC A needs the model (`C:\GLM-5.3-Flash\UD-IQ3_XXS\`, 4 shards, 112.10 GiB)
 
 ## 0. One-time setup (all 3 PCs)
 
-1. Unzip `LlamaGLM-v0.8.3-win-cuda-cu12.8-sm89-sm120-x64.zip` (the download of the "LlamaGLM Windows package" GitHub Actions run) so that `C:\LlamaGLM\llama-server.exe` exists. Use the **same version on all 3 PCs**. Delete older versions (v0.7.0, v0.8.0, v0.8.1) first. To check which build you have: `MANIFEST.txt` starts with `LlamaGLM v0.8.2` and names the source commit, and `.\llama-cli.exe --version` prints the same commit. The "version" number that `llama-cli` prints is llama.cpp's own library version, not the LlamaGLM version.
+1. Unzip `LlamaGLM-v0.8.4-win-cuda-cu12.8-sm89-sm120-x64.zip` (the download of the "LlamaGLM Windows package" GitHub Actions run) so that `C:\LlamaGLM\llama-server.exe` exists. Use the **same version on all 3 PCs**. Delete older versions (v0.7.0, v0.8.0, v0.8.1) first. To check which build you have: `MANIFEST.txt` starts with `LlamaGLM v0.8.2` and names the source commit, and `.\llama-cli.exe --version` prints the same commit. The "version" number that `llama-cli` prints is llama.cpp's own library version, not the LlamaGLM version.
 2. NVIDIA driver R570 or newer (any driver that runs the RTX 5070 Ti is new enough).
 3. **NVIDIA Control Panel > Manage 3D settings > Global settings > "CUDA - Sysmem Fallback Policy" = "Prefer No Sysmem Fallback".** With the default, a full GPU silently spills into shared system RAM, which is one likely cause of the earlier near-freeze.
 4. Firewall, Admin PowerShell, once (only PC A may connect):
@@ -85,6 +85,7 @@ Only "Gate 4 PASS" means the model generated text across the three PCs. Expect i
 | `tight` | 0-16, 37.7 GiB | 17-24, 20.3 GiB | 25-31 | 32-33 | 34-40 | 41-44 + output |
 | `tight-mtp` | 0-17, 40.2 GiB | 18-25, 20.3 GiB | 26-32 | 33-34 | 35-41 | 42-44 + MTP block 45 + output |
 | `relief` | 0-15, 35.2 GiB | 16-23, 20.3 GiB | 24-30 | 31-32 | 33-40 | 41-44 + output |
+| `relief-mtp` | 0-16, 37.7 GiB | 17-24, 20.3 GiB | 25-31 | 32-33 | 34-41 | 42-44 + MTP block 45 + output |
 | `gpu-attn` (experimental) | routed experts of 3-18, about 39 GiB | 0-24 except those experts | 25-31 | 32-33 | 34-40 | 41-44 + output |
 | `laptop-light` (not tested) | 0-21, 50.4 GiB | 22-28 | 31 | 29-30 (KDA only) | 32-40 | 41-44 + output |
 
@@ -99,11 +100,13 @@ Experiments (all off by default; a switch turns one on for one run, or set it in
 | `-FusedHc` | A | keeps the fused hyper-connection post op on (otherwise a placement check turns it off for the whole model); fewer operations and fewer round trips between PCs, same results |
 | `-MoeCacheMib N` | A | with `-Plan gpu-attn`: keeps the most used routed experts of A's RAM layers in N MiB of the 4090 |
 | `-NoCudaGraphs` | A, B, C | diagnostic: CUDA graphs off on that PC's GPU |
+| `-LockClocks` | A, B, C | holds the GPU at full clocks while the server or worker runs, resets them when it exits; needs an administrator window (A asks with a Windows prompt otherwise). By hand: `.\gpu-clocks.ps1` / `.\gpu-clocks.ps1 -Reset` |
+| `-ChunkedLoad` | B, C | the worker reads cached weights in 64 MiB pieces, so loading needs no extra GiB of RAM |
 | `-Mtp`, `-MtpDraftMax N` | A | speculative decoding with the model's MTP block (draft length 1 by default); the output distribution is unchanged |
 | `-Threads N`, `-UBatch N`, `-OpOffload` | A | CPU threads on A, prompt batch size, GPU compute for Stage A's RAM layers during prompts |
 | `-LocalCopy` | B, C | copies between the worker's RAM and GPU on the worker instead of through Stage A |
 
-`.\perf-log.ps1 -Role A` (or `-Role B`, `-Role C`) in a second window logs SSD reads, page faults and CPU use once per second to `logs\perf-*.csv`, and GPU clocks, power state and utilization to `logs\gpu-*.csv`. The test sequence for v0.8.3 is in [`docs/TEST-PLAN-v0.8.3.md`](docs/TEST-PLAN-v0.8.3.md).
+`.\perf-log.ps1 -Role A` (or `-Role B`, `-Role C`) in a second window logs SSD reads, page faults and CPU use once per second to `logs\perf-*.csv`, and GPU clocks, power state and utilization to `logs\gpu-*.csv`. The test sequence for v0.8.4 is in [`docs/TEST-PLAN-v0.8.4.md`](docs/TEST-PLAN-v0.8.4.md).
 
 To move one layer from a worker's RAM to Stage A, lower that device's `ts` value by 1 and `ngl` by 1 (devices are listed in `devices`, in the same order as `ts`).
 

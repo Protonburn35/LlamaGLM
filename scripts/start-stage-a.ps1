@@ -6,7 +6,7 @@
 # Only then it starts llama-server. Use -PlanOnly to stop after Gate 2.
 # Experiments are off unless a switch below (or "options" in cluster_config.json) turns them on.
 param (
-    [ValidateSet("balanced", "balanced-mtp", "tight", "tight-mtp", "relief", "gpu-attn", "laptop-light")][string]$Plan = "balanced",
+    [ValidateSet("balanced", "balanced-mtp", "tight", "tight-mtp", "relief", "relief-mtp", "gpu-attn", "laptop-light")][string]$Plan = "balanced",
     [string]$ModelDir = "",
     [switch]$PlanOnly,
     [switch]$SkipSelfTest,
@@ -26,6 +26,8 @@ param (
     [switch]$NoCudaGraphs,
     # GPU cache for the hottest routed experts kept in Stage A's RAM; only used by -Plan gpu-attn
     [ValidateRange(0, 8192)][int]$MoeCacheMib = 0,
+    # hold the 4090 at full clocks while the server runs (gpu-clocks.ps1, needs administrator rights; reset on exit)
+    [switch]$LockClocks,
     [ValidateRange(0, 64)][int]$Threads = 0,
     [ValidateSet(0, 256, 512, 1024, 2048)][int]$UBatch = 0,
     # folder with llama-server.exe / llama-fit-params.exe, e.g. the official llama.cpp b11780 CUDA build
@@ -136,6 +138,7 @@ $useTiming   = $Timing -or ($opt -and $opt.timing)
 $useOffload  = $OpOffload -or ($opt -and $opt.op_offload)
 $useFusedHc  = $FusedHc -or ($opt -and $opt.fused_hc)
 $noGraphs    = $NoCudaGraphs -or ($opt -and $opt.cuda_graphs_off)
+$useLock     = $LockClocks -or ($opt -and $opt.lock_clocks)
 $moeCache    = if ($MoeCacheMib -gt 0) { $MoeCacheMib } elseif ($opt -and $opt.moe_cache_mib -gt 0) { [int]$opt.moe_cache_mib } else { 0 }
 $nCpuMoe     = if ($p.n_cpu_moe -gt 0) { [int]$p.n_cpu_moe } else { 0 }
 $threadsA    = if ($Threads -gt 0) { $Threads } elseif ($cfg.stage_a.threads -gt 0) { [int]$cfg.stage_a.threads } else { 0 }
@@ -144,13 +147,19 @@ Set-OptionalEnv $log "LLAMA_MOE_PREFETCH" $usePrefetch
 Set-OptionalEnv $log "GGML_SCHED_PROFILE" $useTiming
 Set-OptionalEnv $log "LLAMA_FUSED_HC_FIX" $useFusedHc
 Set-OptionalEnv $log "GGML_CUDA_DISABLE_GRAPHS" $noGraphs
-Write-LogLine $log ("[OPTIONS] plan {0}, MTP {1}, prefetch {2}, timing {3}, fused HC {4}, CUDA graphs {5}, MoE cache {6}, op offload {7}, threads {8}, ubatch {9}" -f $Plan,
+Write-LogLine $log ("[OPTIONS] plan {0}, MTP {1}, prefetch {2}, timing {3}, fused HC {4}, CUDA graphs {5}, GPU clocks {6}, MoE cache {7}, op offload {8}, threads {9}, ubatch {10}" -f $Plan,
     $(if ($useMtp) { "on (draft max $draftMax)" } else { "off" }), $(if ($usePrefetch) { "on" } else { "off" }),
     $(if ($useTiming) { "on" } else { "off" }), $(if ($useFusedHc) { "on" } else { "off" }),
-    $(if ($noGraphs) { "off (diagnostic)" } else { "on" }), $(if ($moeCache -gt 0) { "$moeCache MiB" } else { "off" }),
+    $(if ($noGraphs) { "off (diagnostic)" } else { "on" }), $(if ($useLock) { "locked" } else { "driver default" }),
+    $(if ($moeCache -gt 0) { "$moeCache MiB" } else { "off" }),
     $(if ($useOffload) { "on" } else { "off" }), $(if ($threadsA -gt 0) { $threadsA } else { "default" }), $ubatch) "Cyan"
 if ($moeCache -gt 0 -and $nCpuMoe -eq 0) {
     Write-LogLine $log "[NOTE] -MoeCacheMib only caches experts of GPU layers whose experts stay in RAM; plan '$Plan' has none, so the cache stays empty. Use -Plan gpu-attn." "Yellow"
+}
+# one token selects 8 experts in each of the 16 MoE layers of gpu-attn (about 1 GiB); a smaller cache evicts all of them
+# every token (2026-10-25: 1024 MiB gave 0 hits and made generation slower)
+if ($moeCache -gt 0 -and $moeCache -lt 4096) {
+    Write-LogLine $log "[WARN] -MoeCacheMib $moeCache is too small to keep the experts of more than a few tokens; expect almost no cache hits and slower generation (1024 MiB gave 0% hits). Leave it off unless the 4090 has 4 GiB or more to spare." "Yellow"
 }
 if ($useMtp -and !$p.mtp_block) {
     Write-LogLine $log "[NOTE] plan '$Plan' leaves no room for the MTP block on C's GPU; Gate 2 will likely refuse it. Use -Plan balanced-mtp or tight-mtp." "Yellow"
@@ -225,7 +234,18 @@ if ($useMtp) {
 Write-LogLine $log ("Starting llama-server on http://{0}:{1}, server log: {2}" -f $cfg.stage_a.api_host, $cfg.stage_a.api_port, $serverLog) "Green"
 Write-LogLine $log "First load sends about 56 GiB to the workers (about 8-10 min on 1 GbE); later loads use the worker caches. Then run .\smoke-test.ps1 in a second window." "Yellow"
 Add-Content -Path $log -Value ("{0} >>> llama-server.exe {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"), ($server -join " ")) -Encoding UTF8
-& (Join-Path $BinDir "llama-server.exe") @server
-$code = $LASTEXITCODE
-Write-LogLine $log "llama-server exited with code $code" "Yellow"
+$locked = $false
+if ($useLock) {
+    $locked = Invoke-GpuClocks $log
+}
+try {
+    & (Join-Path $BinDir "llama-server.exe") @server
+    $code = $LASTEXITCODE
+    Write-LogLine $log "llama-server exited with code $code" "Yellow"
+} finally {
+    # also runs on Ctrl+C; if the window is closed instead, run .\gpu-clocks.ps1 -Reset as administrator or reboot
+    if ($locked) {
+        [void](Invoke-GpuClocks $log -Reset)
+    }
+}
 exit $code

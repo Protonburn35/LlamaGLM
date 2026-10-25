@@ -80,4 +80,6 @@ Both failed starts (07:41, 07:50) stopped while the laptop loaded its RAM layers
 4. **MoE cache:** warn when `-MoeCacheMib` cannot hold one token's experts, and drop it from the test plan; retest `gpu-attn` without it once clocks are locked.
 5. **Defaults (for the user to decide):** `-FusedHc` and `-LocalCopy` gave identical results and only gains; they could become defaults with switches to turn them off.
 
+v0.8.4 implements 1-4 as options (`-LockClocks`, `relief-mtp`, `-ChunkedLoad`, the cache warning); 5 stays the user's choice. See [TEST-PLAN-v0.8.4.md](TEST-PLAN-v0.8.4.md).
+
 Expected with 1-2 (estimate): `relief` at about 330-350 ms/token (about 3 tok/s) and MTP at about 3.5-4 tok/s. A's paging, about 75-150 MB per token, then remains the largest cost: option 6 of [SPEED_RESEARCH-2026-10-25.md](SPEED_RESEARCH-2026-10-25.md).

@@ -1485,6 +1485,7 @@ private:
 
     void sync_all_backends();
     bool get_cached_file(uint64_t hash, std::vector<uint8_t> & data);
+    bool open_cached_file(uint64_t hash, std::ifstream & ifs, size_t & size);
     ggml_tensor * deserialize_tensor(struct ggml_context * ctx, const rpc_tensor * tensor);
     ggml_tensor * create_node(uint64_t id,
                               struct ggml_context * ctx,
@@ -1512,6 +1513,8 @@ private:
     bool profile    = false;       // GGML_RPC_SERVER_PROFILE=1: synchronize after each graph and report its compute time
     bool local_copy = false;       // GGML_RPC_SERVER_LOCAL_COPY=1: copy between devices of this server through host memory
     std::vector<uint8_t> copy_buf;
+    bool chunked_load = false;     // GGML_RPC_SERVER_CHUNKED_LOAD=1: read cached weights in pieces instead of whole tensors
+    std::vector<uint8_t> load_buf;
     std::vector<size_t> free_base; // free memory of each device when the client connected
     std::chrono::steady_clock::time_point t_report;
     // computed graphs cached per backend, keyed by uid
@@ -1529,6 +1532,8 @@ void rpc_server::init_stats() {
     profile = env_profile != nullptr && atoi(env_profile) != 0;
     const char * env_local_copy = getenv("GGML_RPC_SERVER_LOCAL_COPY");
     local_copy = env_local_copy != nullptr && atoi(env_local_copy) != 0;
+    const char * env_chunked_load = getenv("GGML_RPC_SERVER_CHUNKED_LOAD");
+    chunked_load = env_chunked_load != nullptr && atoi(env_chunked_load) != 0;
 
     // GGML_RPC_SERVER_RESERVE_MIB: one value for all devices or one value per device, e.g. "1024,6144"
     const char * env = getenv("GGML_RPC_SERVER_RESERVE_MIB");
@@ -2023,6 +2028,26 @@ bool rpc_server::get_cached_file(uint64_t hash, std::vector<uint8_t> & data) {
     return true;
 }
 
+bool rpc_server::open_cached_file(uint64_t hash, std::ifstream & ifs, size_t & size) {
+    if (!cache_dir) {
+        return false;
+    }
+    char hash_str[17];
+    snprintf(hash_str, sizeof(hash_str), "%016" PRIx64, hash);
+    fs::path cache_file = fs::path(cache_dir) / hash_str;
+    std::error_code ec;
+    const auto file_size = fs::file_size(cache_file, ec);
+    if (ec) {
+        return false;
+    }
+    ifs.open(cache_file, std::ios::binary);
+    if (!ifs) {
+        return false;
+    }
+    size = (size_t) file_size;
+    return true;
+}
+
 bool rpc_server::set_tensor_hash(const rpc_msg_set_tensor_hash_req & request, rpc_msg_set_tensor_hash_rsp & response)
 {
     sync_all_backends();
@@ -2040,14 +2065,20 @@ bool rpc_server::set_tensor_hash(const rpc_msg_set_tensor_hash_req & request, rp
         return false;
     }
 
+    // with chunked_load the file is read in pieces below, so a 1 GiB tensor does not need 1 GiB of extra memory
     std::vector<uint8_t> cached_file;
-    if (!get_cached_file(request.hash, cached_file)) {
+    std::ifstream ifs;
+    size_t size = 0;
+    const bool found = chunked_load ? open_cached_file(request.hash, ifs, size) : get_cached_file(request.hash, cached_file);
+    if (!found) {
         LOG_DBG2("[%s] tensor: %s, offset: %" PRIu64 ", hash: 0x%" PRIx64 ", cache miss\n",
                 __func__, rpc_log_format_tensor(tensor).c_str(), request.offset, request.hash);
         response.result = 0;
         return true;
     }
-    size_t size = cached_file.size();
+    if (!chunked_load) {
+        size = cached_file.size();
+    }
     LOG_DBG2("[%s] tensor: %s, buffer: %p, data: %p, offset: %" PRIu64 ", size: %s, hash: 0x%" PRIx64 ", cache hit\n",
             __func__, rpc_log_format_tensor(tensor).c_str(), (void*)tensor->buffer, tensor->data, request.offset,
             rpc_log_format_size(size).c_str(), request.hash);
@@ -2065,7 +2096,20 @@ bool rpc_server::set_tensor_hash(const rpc_msg_set_tensor_hash_req & request, rp
             return false;
         }
     }
-    ggml_backend_tensor_set(tensor, cached_file.data(), request.offset, size);
+    if (chunked_load) {
+        const size_t chunk = 64ull << 20;
+        load_buf.resize(std::min(size, chunk));
+        for (size_t pos = 0; pos < size; pos += chunk) {
+            const size_t n = std::min(chunk, size - pos);
+            if (!ifs.read((char *) load_buf.data(), (std::streamsize) n)) {
+                LOG_ERROR("[%s] failed to read the cached file for hash 0x%" PRIx64 "\n", __func__, request.hash);
+                return false;
+            }
+            ggml_backend_tensor_set(tensor, load_buf.data(), request.offset + pos, n);
+        }
+    } else {
+        ggml_backend_tensor_set(tensor, cached_file.data(), request.offset, size);
+    }
     response.result = 1;
     if (dev_stats * st = buffer_stats(tensor->buffer)) {
         st->cache_bytes += size;

@@ -183,3 +183,35 @@ function Set-OptionalEnv {
         Write-LogLine $LogPath "[INFO] removed environment variable $Name for this session (option off)" "DarkGray"
     }
 }
+
+# -LockClocks: run gpu-clocks.ps1 as administrator, directly when this window already is one (an SSH session of an
+# administrator account is), otherwise through a UAC prompt; returns $true if a clock was locked (or reset)
+function Invoke-GpuClocks {
+    param([string]$LogPath, [switch]$Reset)
+    $script = Join-Path $PSScriptRoot "gpu-clocks.ps1"
+    $out = [System.IO.Path]::GetTempFileName()
+    $argLine = "-NoProfile -ExecutionPolicy Bypass -File `"$script`" -OutFile `"$out`"" + $(if ($Reset) { " -Reset" } else { "" })
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $isAdmin = ([Security.Principal.WindowsPrincipal]$id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    try {
+        if ($isAdmin) {
+            Start-Process -FilePath "powershell" -ArgumentList $argLine -WindowStyle Hidden -Wait
+        } else {
+            Write-LogLine $LogPath "[INFO] GPU clocks need administrator rights: confirm the Windows prompt (or start this window as administrator)." "Yellow"
+            Start-Process -FilePath "powershell" -ArgumentList $argLine -Verb RunAs -WindowStyle Hidden -Wait
+        }
+    } catch {
+        Write-LogLine $LogPath "[WARN] GPU clocks: the administrator prompt was declined or is not available here; clocks unchanged." "Yellow"
+    }
+    # the result is read from the output file: an elevated process may not report its exit code back
+    $lines = @(Get-Content -Path $out -ErrorAction SilentlyContinue)
+    Remove-Item -Path $out -ErrorAction SilentlyContinue
+    foreach ($l in $lines) {
+        Write-LogLine $LogPath $l "Gray"
+    }
+    $summary = @($lines | Where-Object { $_ -match '^\[GPU CLOCKS\]' })
+    if ($Reset) {
+        return ($summary.Count -gt 0)
+    }
+    return (@($summary | Where-Object { $_ -match ': locked' }).Count -gt 0)
+}

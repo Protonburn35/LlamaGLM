@@ -55,7 +55,7 @@ foreach ($plan in $cfg.profiles.PSObject.Properties) {
     # with --n-cpu-moe every layer is offloaded and the CPU-expert layers must be on the 4090 (the first device)
     if ($p.n_cpu_moe -gt 0 -and ($p.ngl -ne 47 -or $p.ts[0] -lt $p.n_cpu_moe)) { throw "plan $($plan.Name): n_cpu_moe needs ngl 47 and at least n_cpu_moe layers on the first device" }
 }
-foreach ($name in @("mtp", "moe_prefetch", "timing", "op_offload", "fused_hc", "cuda_graphs_off", "worker_timing", "worker_local_copy", "worker_cuda_graphs_off")) {
+foreach ($name in @("mtp", "moe_prefetch", "timing", "op_offload", "fused_hc", "cuda_graphs_off", "lock_clocks", "worker_timing", "worker_local_copy", "worker_cuda_graphs_off", "worker_lock_clocks", "worker_chunked_load")) {
     if ($cfg.options.$name -ne $false) { throw "option $name must default to false" }
 }
 if ($cfg.options.moe_cache_mib -ne 0) { throw "option moe_cache_mib must default to 0" }

@@ -11,6 +11,10 @@ param (
     [switch]$LocalCopy,
     # diagnostic: turn CUDA graphs off on this PC's GPU to see whether they were working (GGML_CUDA_DISABLE_GRAPHS)
     [switch]$NoCudaGraphs,
+    # hold this PC's GPU at full clocks while the worker runs (gpu-clocks.ps1, needs administrator rights; reset on exit)
+    [switch]$LockClocks,
+    # read cached weights in pieces, so loading a 1 GiB tensor needs no extra 1 GiB of RAM (GGML_RPC_SERVER_CHUNKED_LOAD)
+    [switch]$ChunkedLoad,
     # folder with ggml-rpc-server.exe, e.g. the official llama.cpp b11780 CUDA build
     [string]$BinDir = $PSScriptRoot,
     [string]$ConfigPath = (Join-Path $PSScriptRoot "cluster_config.json")
@@ -75,11 +79,15 @@ $opt = $cfg.options
 $useTiming    = $Timing -or ($opt -and $opt.worker_timing)
 $useLocalCopy = $LocalCopy -or ($opt -and $opt.worker_local_copy)
 $noGraphs     = $NoCudaGraphs -or ($opt -and $opt.worker_cuda_graphs_off)
+$useLock      = $LockClocks -or ($opt -and $opt.worker_lock_clocks)
+$useChunked   = $ChunkedLoad -or ($opt -and $opt.worker_chunked_load)
 Set-OptionalEnv $log "GGML_RPC_SERVER_PROFILE" $useTiming
 Set-OptionalEnv $log "GGML_RPC_SERVER_LOCAL_COPY" $useLocalCopy
 Set-OptionalEnv $log "GGML_CUDA_DISABLE_GRAPHS" $noGraphs
-Write-LogLine $log ("[OPTIONS] timing {0}, local copy {1}, CUDA graphs {2}" -f $(if ($useTiming) { "on" } else { "off" }),
-    $(if ($useLocalCopy) { "on" } else { "off" }), $(if ($noGraphs) { "off (diagnostic)" } else { "on" })) "Cyan"
+Set-OptionalEnv $log "GGML_RPC_SERVER_CHUNKED_LOAD" $useChunked
+Write-LogLine $log ("[OPTIONS] timing {0}, local copy {1}, CUDA graphs {2}, GPU clocks {3}, chunked load {4}" -f $(if ($useTiming) { "on" } else { "off" }),
+    $(if ($useLocalCopy) { "on" } else { "off" }), $(if ($noGraphs) { "off (diagnostic)" } else { "on" }),
+    $(if ($useLock) { "locked" } else { "driver default" }), $(if ($useChunked) { "on" } else { "off" })) "Cyan"
 $threads = $w.threads
 if ($threads -le 0) {
     $threads = [int]((Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum)
@@ -90,15 +98,26 @@ Write-LogLine $log ("  New-NetFirewallRule -DisplayName 'LlamaGLM-RPC-{0}' -Dire
 Write-LogLine $log "[stats] lines below show what this worker received and computed. Keep this window open; Ctrl+C stops the worker." "Green"
 
 $argList = @("-H", $w.host, "-p", "$($w.port)", "-d", $w.devices, "-t", "$threads", "-c")
+$locked = $false
+if ($useLock) {
+    $locked = Invoke-GpuClocks $log
+}
 # a crashed worker (for example a CUDA error) is restarted as a new process with a fresh CUDA context,
 # so Stage A can simply be started again; the count is limited so a broken GPU does not loop forever
-for ($run = 0; $run -le $Restarts; $run++) {
-    $code = Invoke-Logged (Join-Path $BinDir "ggml-rpc-server.exe") $argList $log
-    Write-LogLine $log "ggml-rpc-server exited with code $code" "Yellow"
-    if ($code -eq 0 -or $run -eq $Restarts) {
-        break
+try {
+    for ($run = 0; $run -le $Restarts; $run++) {
+        $code = Invoke-Logged (Join-Path $BinDir "ggml-rpc-server.exe") $argList $log
+        Write-LogLine $log "ggml-rpc-server exited with code $code" "Yellow"
+        if ($code -eq 0 -or $run -eq $Restarts) {
+            break
+        }
+        Write-LogLine $log ("Restarting in 15 s ({0} of {1}). Stage A must be restarted too. Send {2} if this repeats." -f ($run + 1), $Restarts, $log) "Yellow"
+        Start-Sleep -Seconds 15
     }
-    Write-LogLine $log ("Restarting in 15 s ({0} of {1}). Stage A must be restarted too. Send {2} if this repeats." -f ($run + 1), $Restarts, $log) "Yellow"
-    Start-Sleep -Seconds 15
+} finally {
+    # also runs on Ctrl+C; if the window is closed instead, run .\gpu-clocks.ps1 -Reset as administrator or reboot
+    if ($locked) {
+        [void](Invoke-GpuClocks $log -Reset)
+    }
 }
 exit $code

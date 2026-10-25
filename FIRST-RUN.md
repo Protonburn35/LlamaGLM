@@ -1,4 +1,4 @@
-# LlamaGLM first run (v0.8.2)
+# LlamaGLM first run (v0.8.3)
 
 No inference has worked on these PCs yet. This version runs cheap checks first and stops at the first problem, so a bad plan or a broken GPU kernel shows up as a clear message instead of a frozen desktop. Do the steps in order; each one stops on failure.
 
@@ -14,7 +14,7 @@ Only PC A needs the model (`C:\GLM-5.3-Flash\UD-IQ3_XXS\`, 4 shards, 112.10 GiB)
 
 ## 0. One-time setup (all 3 PCs)
 
-1. Unzip `LlamaGLM-v0.8.2-win-cuda-cu12.8-sm89-sm120-x64.zip` (the download of the "LlamaGLM Windows package" GitHub Actions run) so that `C:\LlamaGLM\llama-server.exe` exists. Use the **same version on all 3 PCs**. Delete older versions (v0.7.0, v0.8.0, v0.8.1) first. To check which build you have: `MANIFEST.txt` starts with `LlamaGLM v0.8.2` and names the source commit, and `.\llama-cli.exe --version` prints the same commit. The "version" number that `llama-cli` prints is llama.cpp's own library version, not the LlamaGLM version.
+1. Unzip `LlamaGLM-v0.8.3-win-cuda-cu12.8-sm89-sm120-x64.zip` (the download of the "LlamaGLM Windows package" GitHub Actions run) so that `C:\LlamaGLM\llama-server.exe` exists. Use the **same version on all 3 PCs**. Delete older versions (v0.7.0, v0.8.0, v0.8.1) first. To check which build you have: `MANIFEST.txt` starts with `LlamaGLM v0.8.2` and names the source commit, and `.\llama-cli.exe --version` prints the same commit. The "version" number that `llama-cli` prints is llama.cpp's own library version, not the LlamaGLM version.
 2. NVIDIA driver R570 or newer (any driver that runs the RTX 5070 Ti is new enough).
 3. **NVIDIA Control Panel > Manage 3D settings > Global settings > "CUDA - Sysmem Fallback Policy" = "Prefer No Sysmem Fallback".** With the default, a full GPU silently spills into shared system RAM, which is one likely cause of the earlier near-freeze.
 4. Firewall, Admin PowerShell, once (only PC A may connect):
@@ -59,7 +59,7 @@ cd C:\LlamaGLM
 .\start-stage-a.ps1
 ```
 
-It repeats Gates 0-2 (quick) and starts `llama-server`. The first load sends about 56 GiB to the workers (about 8-10 min on 1 GbE), then runs a warm-up. Stage A keeps layers 0-15 in RAM through mmap; about 15 GiB of those are read from its SSD while it works, which is normal and does not use the page file. Later loads are faster because the workers read their weight cache.
+It repeats Gates 0-2 (quick) and starts `llama-server`. The first load sends about 56 GiB to the workers (about 8-10 min on 1 GbE), then runs a warm-up. Stage A keeps layers 0-17 in RAM through mmap (plan `balanced`); about 16 GiB of those are read from its SSD while it works, which is normal and does not use the page file. Later loads are faster because the workers read their weight cache.
 
 ## 4. Test real generation (second window on A)
 
@@ -72,7 +72,7 @@ cd C:\LlamaGLM
 - Gate 4: a raw completion and a chat completion must return generated tokens (`completion_tokens > 0`) **and the right answers**: "The capital of France is" must continue with Paris, "what is 2 + 2?" must contain 4. Broken GPU kernels still produce tokens, only wrong ones. GLM always thinks first; the test asks for short reasoning and accepts text in `reasoning_content`. If the printed text is clearly correct but worded differently, `.\smoke-test.ps1 -NoAnswerCheck` skips this check.
 - Gate 5: two more requests, health still ok, the token counter advances.
 
-Only "Gate 4 PASS" means the model generated text across the three PCs. Expect it to be slow; speed has never been measured.
+Only "Gate 4 PASS" means the model generated text across the three PCs. Expect it to be slow: about 1.8 tokens/s of output and 3.6 tokens/s of prompt processing were measured on 2026-10-25.
 
 ## 5. Plans and settings
 
@@ -84,21 +84,26 @@ Only "Gate 4 PASS" means the model generated text across the three PCs. Expect i
 | `balanced-mtp` | 0-18, 42.8 GiB | 19-25 | 26-32 | 33-34 | 35-41 | 42-44 + MTP block 45 + output |
 | `tight` | 0-16, 37.7 GiB | 17-24, 20.3 GiB | 25-31 | 32-33 | 34-40 | 41-44 + output |
 | `tight-mtp` | 0-17, 40.2 GiB | 18-25, 20.3 GiB | 26-32 | 33-34 | 35-41 | 42-44 + MTP block 45 + output |
+| `relief` | 0-15, 35.2 GiB | 16-23, 20.3 GiB | 24-30 | 31-32 | 33-40 | 41-44 + output |
+| `gpu-attn` (experimental) | routed experts of 3-18, about 39 GiB | 0-24 except those experts | 25-31 | 32-33 | 34-40 | 41-44 + output |
 | `laptop-light` (not tested) | 0-21, 50.4 GiB | 22-28 | 31 | 29-30 (KDA only) | 32-40 | 41-44 + output |
 
-`tight` leaves about 1.6 GiB of the 4090 free at load; Gate 2 refuses it if a desktop program uses more VRAM. MTP needs a plan whose name ends in `-mtp` (room for the MTP block on C's GPU).
+`tight` and `relief` leave about 1.6 GiB of the 4090 free at load; Gate 2 refuses them if a desktop program uses more VRAM. `relief` also needs about 24.1 GiB free in C's RAM at load. In `gpu-attn` the 4090 runs everything of layers 0-24 except the routed experts of layers 0-18, which the 7800X3D computes from its RAM. MTP needs a plan whose name ends in `-mtp` (room for the MTP block on C's GPU).
 
 Experiments (all off by default; a switch turns one on for one run, or set it in the `options` block of `cluster_config.json`):
 
 | Switch | On | Effect |
 |---|---|---|
 | `-Prefetch` | A | Windows reads the experts each token selects from Stage A's RAM layers in large parallel reads instead of small page faults; results unchanged |
-| `-Timing` | A, B, C | per-device milliseconds per token in the logs (`sched_profile` lines on A, `busy` in the worker `[stats]`) |
+| `-Timing` | A, B, C | per-device milliseconds per token in the logs (`sched_profile` lines on A, `busy` in the worker `[stats]`), and the slowest token of each 30-s window |
+| `-FusedHc` | A | keeps the fused hyper-connection post op on (otherwise a placement check turns it off for the whole model); fewer operations and fewer round trips between PCs, same results |
+| `-MoeCacheMib N` | A | with `-Plan gpu-attn`: keeps the most used routed experts of A's RAM layers in N MiB of the 4090 |
+| `-NoCudaGraphs` | A, B, C | diagnostic: CUDA graphs off on that PC's GPU |
 | `-Mtp`, `-MtpDraftMax N` | A | speculative decoding with the model's MTP block (draft length 1 by default); the output distribution is unchanged |
 | `-Threads N`, `-UBatch N`, `-OpOffload` | A | CPU threads on A, prompt batch size, GPU compute for Stage A's RAM layers during prompts |
 | `-LocalCopy` | B, C | copies between the worker's RAM and GPU on the worker instead of through Stage A |
 
-`.\perf-log.ps1 -Role A` (or `-Role B`, `-Role C`) in a second window logs SSD reads, page faults and CPU use once per second to `logs\perf-*.csv`. The test sequence for v0.8.2 is in [`docs/TEST-PLAN-v0.8.2.md`](docs/TEST-PLAN-v0.8.2.md).
+`.\perf-log.ps1 -Role A` (or `-Role B`, `-Role C`) in a second window logs SSD reads, page faults and CPU use once per second to `logs\perf-*.csv`, and GPU clocks, power state and utilization to `logs\gpu-*.csv`. The test sequence for v0.8.3 is in [`docs/TEST-PLAN-v0.8.3.md`](docs/TEST-PLAN-v0.8.3.md).
 
 To move one layer from a worker's RAM to Stage A, lower that device's `ts` value by 1 and `ngl` by 1 (devices are listed in `devices`, in the same order as `ts`).
 

@@ -2,9 +2,9 @@
 
 GLM-5.3-Flash (`unsloth/GLM-5.3-Flash-GGUF`, `UD-IQ3_XXS`, 112.1 GiB) across three Windows 11 PCs on a LAN, using upstream llama.cpp (b11780) with `ggml-cuda` and `ggml-rpc` plus a small set of safety patches and launchers.
 
-**Status: generates text on the three PCs, slowly.** Version 0.8.0 fixed the defects found in the 0.7.0 release (see `HANDOFF.md`). Version 0.8.1 is the same code plus the import-review fixes, built with MSVC and nvcc by a GitHub Actions workflow instead of the VM's clang cross-build. v0.8.1 ran on the three PCs on 2026-10-24 (1.71 tok/s generation, 3.42 tok/s prompt processing; [hardware handoff](docs/HARDWARE_HANDOFF-2026-10-24.md)). Version 0.8.2 adds optional speed experiments, all off by default ([test plan](docs/TEST-PLAN-v0.8.2.md)).
+**Status: generates text on the three PCs, slowly.** Version 0.8.0 fixed the defects found in the 0.7.0 release (see `HANDOFF.md`). Version 0.8.1 is the same code plus the import-review fixes, built with MSVC and nvcc by a GitHub Actions workflow instead of the VM's clang cross-build. v0.8.1 ran on the three PCs on 2026-10-24 (1.71 tok/s generation, 3.42 tok/s prompt processing; [hardware handoff](docs/HARDWARE_HANDOFF-2026-10-24.md)). Version 0.8.2 adds optional speed experiments, all off by default ([test plan](docs/TEST-PLAN-v0.8.2.md)). Version 0.8.3 adds the fixes found in the 2026-10-25 logs, also off by default ([test plan](docs/TEST-PLAN-v0.8.3.md)).
 
-**Speed (measured 2026-10-24):** 1.71 tokens/s output and 3.42 tokens/s prompt processing. Likely cause and options: [`docs/SPEED_RESEARCH-2026-10-24.md`](docs/SPEED_RESEARCH-2026-10-24.md); older estimates in [`LIMITATIONS.md`](LIMITATIONS.md).
+**Speed (measured 2026-10-25):** 1.77 tokens/s output and 3.65 tokens/s prompt processing (1.71 and 3.42 on 2026-10-24). Causes and options: [`docs/SPEED_RESEARCH-2026-10-25.md`](docs/SPEED_RESEARCH-2026-10-25.md) and [`docs/SPEED_RESEARCH-2026-10-24.md`](docs/SPEED_RESEARCH-2026-10-24.md); older estimates in [`LIMITATIONS.md`](LIMITATIONS.md).
 
 | PC | GPU / RAM | Role | Holds (default plan) |
 |---|---|---|---|

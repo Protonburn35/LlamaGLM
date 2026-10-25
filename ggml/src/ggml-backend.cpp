@@ -928,11 +928,16 @@ struct ggml_backend_sched_split {
 // optional timing summary [GGML_SCHED_PROFILE], kind 0: graphs of up to 8 tokens, kind 1: larger graphs
 struct ggml_backend_sched_profile {
     int     id;
+    char    name     [GGML_SCHED_MAX_BACKENDS][64]; // device names, copied at creation: the last report runs when the
+                                                    // scheduler is freed, which can be after its backends are freed
     int64_t n_graphs [2];
     int64_t period_us[2];                          // from the start of a graph to the start of the next one
     int64_t period_n [2];
     int64_t run_us   [2][GGML_SCHED_MAX_BACKENDS]; // compute of the splits of a backend, synchronized
     int64_t fetch_us [2][GGML_SCHED_MAX_BACKENDS]; // copies of its outputs into other splits, includes waiting for a remote backend
+    int64_t cur_us   [GGML_SCHED_MAX_BACKENDS];    // run + fetch of the current graph
+    int64_t max_period[2];                         // the slowest graph of the window and its run + fetch per backend
+    int64_t max_us   [2][GGML_SCHED_MAX_BACKENDS];
     int64_t t_graph;
     int64_t t_report;
     int     kind;
@@ -1897,22 +1902,43 @@ static void ggml_backend_sched_profile_report(ggml_backend_sched_t sched) {
             const double fetch = p->fetch_us[k][b]/n/1000.0;
             sum += run + fetch;
             char buf[128];
-            ggml_backend_dev_t dev = ggml_backend_get_device(sched->backends[b]);
-            snprintf(buf, sizeof(buf), " | %s run %.1f fetch %.1f", dev ? ggml_backend_dev_name(dev) : ggml_backend_name(sched->backends[b]), run, fetch);
+            snprintf(buf, sizeof(buf), " | %s run %.1f fetch %.1f", p->name[b], run, fetch);
             line += buf;
         }
         // rest: sampling, the output copy of the last split (including its remote compute) and the server
         const double period = p->period_n[k] > 0 ? p->period_us[k]/(double) p->period_n[k]/1000.0 : 0.0;
         GGML_LOG_INFO("sched_profile[%d] %s: %" PRId64 " graphs, %.1f ms/graph%s | rest %.1f (ms per graph)\n",
             p->id, kind_names[k], p->n_graphs[k], period, line.c_str(), period > 0.0 ? period - sum : 0.0);
+
+        // the slowest graph shows where a stall happened
+        if (p->max_period[k] > 0) {
+            double max_sum = 0.0;
+            std::string max_line;
+            for (int b = 0; b < sched->n_backends; b++) {
+                if (p->max_us[k][b] == 0) {
+                    continue;
+                }
+                const double t = p->max_us[k][b]/1000.0;
+                max_sum += t;
+                char buf[128];
+                snprintf(buf, sizeof(buf), " | %s %.1f", p->name[b], t);
+                max_line += buf;
+            }
+            const double max_period = p->max_period[k]/1000.0;
+            GGML_LOG_INFO("sched_profile[%d] %s: slowest graph %.1f ms%s | rest %.1f (ms, run + fetch per device)\n",
+                p->id, kind_names[k], max_period, max_line.c_str(), max_period - max_sum);
+        }
     }
     const int id = p->id;
     const int kind = p->kind;
     const int64_t t_graph = p->t_graph;
+    char name[GGML_SCHED_MAX_BACKENDS][64];
+    memcpy(name, p->name, sizeof(name));
     memset(p, 0, sizeof(*p));
     p->id = id;
     p->kind = kind;
     p->t_graph = t_graph;
+    memcpy(p->name, name, sizeof(name));
 }
 
 static void ggml_backend_sched_profile_begin(ggml_backend_sched_t sched, const struct ggml_cgraph * graph) {
@@ -1920,8 +1946,13 @@ static void ggml_backend_sched_profile_begin(ggml_backend_sched_t sched, const s
     const int64_t now = ggml_time_us();
     // the time between requests is not part of a graph
     if (p->kind >= 0 && now - p->t_graph < 10*1000000LL) {
-        p->period_us[p->kind] += now - p->t_graph;
+        const int64_t period = now - p->t_graph;
+        p->period_us[p->kind] += period;
         p->period_n[p->kind]++;
+        if (period > p->max_period[p->kind]) {
+            p->max_period[p->kind] = period;
+            memcpy(p->max_us[p->kind], p->cur_us, sizeof(p->cur_us));
+        }
     }
     if (p->t_report == 0) {
         p->t_report = now;
@@ -1945,6 +1976,7 @@ static void ggml_backend_sched_profile_begin(ggml_backend_sched_t sched, const s
     p->kind = kind;
     p->t_graph = now;
     p->n_graphs[kind]++;
+    memset(p->cur_us, 0, sizeof(p->cur_us));
 }
 
 static void ggml_backend_sched_copy_input_timed(ggml_backend_sched_t sched, struct ggml_backend_sched_split * split, struct ggml_tensor * input) {
@@ -1956,7 +1988,9 @@ static void ggml_backend_sched_copy_input_timed(ggml_backend_sched_t sched, stru
     ggml_backend_sched_copy_input(sched, split, input);
     const int src_id = tensor_backend_id(input);
     if (src_id >= 0) {
-        sched->profile->fetch_us[sched->profile->kind][src_id] += ggml_time_us() - t0;
+        const int64_t t = ggml_time_us() - t0;
+        sched->profile->fetch_us[sched->profile->kind][src_id] += t;
+        sched->profile->cur_us[src_id] += t;
     }
 }
 
@@ -2038,7 +2072,9 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
         // a remote backend returns once the work is sent, its compute shows up as fetch time of the next split
         if (sched->profile) {
             ggml_backend_synchronize(split_backend);
-            sched->profile->run_us[sched->profile->kind][split_backend_id] += ggml_time_us() - t_run;
+            const int64_t t = ggml_time_us() - t_run;
+            sched->profile->run_us[sched->profile->kind][split_backend_id] += t;
+            sched->profile->cur_us[split_backend_id] += t;
         }
 
         // record the event of this split
@@ -2121,6 +2157,12 @@ ggml_backend_sched_t ggml_backend_sched_new(
             for (int c = 0; c < sched->n_copies; c++) {
                 sched->events[b][c] = ggml_backend_event_new(backends[b]->device);
             }
+        }
+
+        if (sched->profile) {
+            ggml_backend_dev_t dev = ggml_backend_get_device(backends[b]);
+            snprintf(sched->profile->name[b], sizeof(sched->profile->name[b]), "%s",
+                dev ? ggml_backend_dev_name(dev) : ggml_backend_name(backends[b]));
         }
     }
 

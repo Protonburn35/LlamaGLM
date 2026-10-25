@@ -89,6 +89,22 @@ Options 1-4 together could plausibly reach 300-400 ms/token (2.5-3.3 tok/s) befo
 
 Test session (one sitting): workers with `-Timing -LocalCopy`, NVIDIA "Prefer maximum performance" on all three PCs, `perf-log.ps1` on all three, then on A: (a) `-Timing -Prefetch -Plan tight`, (b) the same plus `-FusedHc`, (c) (b) with the new plan. Compare `sched_profile`, worker `busy` and the GPU clocks. Optional, if time allows: (b) again with `GGML_CUDA_DISABLE_GRAPHS=1` set in A's window, to see whether CUDA graphs were active.
 
+## 5. What v0.8.3 implemented
+
+See [TEST-PLAN-v0.8.3.md](TEST-PLAN-v0.8.3.md).
+
+- **Option 1** as `-FusedHc`: `LLAMA_FUSED_HC_FIX=1` makes `resolve_fused_ops` accept a fused node on another device when both devices support the op.
+- **Option 9** in `-Timing`: the slowest graph per window, with run + fetch per device, and the slowest worker graph since the last `[stats]` line.
+- **GPU clock logging** in `perf-log.ps1`.
+- **Plans:** `relief` (option 4) and `gpu-attn` (option 11), with `-MoeCacheMib`.
+- **`-NoCudaGraphs`** for the graph diagnostic.
+
+Not implemented:
+- **Pinning the HC pre norm to the next layer's device.** Tried as a way to bring a hop down to one hidden-state copy, but the scheduler then copies the reshaped view of the residual instead, so it stays at 2 copies. Removed.
+- **Options 5-7 and 10.**
+
+Found while testing: the v0.8.2 timing report at scheduler shutdown read device names from backends that llama.cpp frees first. It crashed in about half of the local `-Timing` runs; now the names are copied at creation.
+
 ## Sources
 
 - Engine source: `src/llama-context.cpp` (`resolve_fused_ops`), `src/models/glm5-next.cpp` (HC pre/post, DSA selection), `ggml/src/ggml-backend.cpp` (split inputs, `ggml_backend_tensor_copy`), `ggml/src/ggml-rpc/ggml-rpc.cpp` (`cpy_tensor`, `GRAPH_RECOMPUTE`), `ggml/src/ggml-cuda/ggml-cuda.cu` (CUDA graph warmup and reuse).

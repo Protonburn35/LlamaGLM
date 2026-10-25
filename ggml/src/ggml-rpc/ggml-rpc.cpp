@@ -1474,6 +1474,7 @@ private:
         uint64_t n_graphs    = 0;
         uint64_t n_nodes     = 0;
         uint64_t busy_us     = 0; // graph compute time, measured with GGML_RPC_SERVER_PROFILE=1
+        uint64_t busy_max_us = 0; // the slowest graph since the last [stats] line
         uint64_t recv_report = 0; // recv_bytes + cache_bytes at the last progress line
     };
 
@@ -1573,9 +1574,10 @@ void rpc_server::report_stats(bool force) {
         if (s.recv_bytes + s.cache_bytes == 0 && s.n_graphs == 0 && s.n_alloc_err == 0) {
             continue;
         }
-        char busy[64] = "";
+        char busy[96] = "";
         if (profile && s.n_graphs > 0) {
-            snprintf(busy, sizeof(busy), ", busy %.1f ms/graph", s.busy_us/1000.0/s.n_graphs);
+            snprintf(busy, sizeof(busy), ", busy %.1f ms/graph (slowest %.1f ms)", s.busy_us/1000.0/s.n_graphs, s.busy_max_us/1000.0);
+            s.busy_max_us = 0;
         }
         LOG_INFO("[stats] device %zu (%s): buffers %.2f GiB (peak %.2f GiB, %" PRIu64 " refused), received %.2f GiB, from cache %.2f GiB, sent %.2f MiB, graphs %" PRIu64 " (%" PRIu64 " nodes)%s\n",
                  i, ggml_backend_name(backends[i]), s.alloc_size/1073741824.0, s.alloc_peak/1073741824.0, s.n_alloc_err,
@@ -1590,7 +1592,9 @@ void rpc_server::compute_graph(uint32_t device, ggml_cgraph * graph) {
     GGML_ASSERT(status == GGML_STATUS_SUCCESS && "Unsuccessful graph computations are not supported with RPC");
     if (profile) {
         ggml_backend_synchronize(backends[device]);
-        stats[device].busy_us += ggml_time_us() - t0;
+        const uint64_t t = ggml_time_us() - t0;
+        stats[device].busy_us += t;
+        stats[device].busy_max_us = std::max(stats[device].busy_max_us, t);
     }
     stats[device].n_graphs++;
     stats[device].n_nodes += graph->n_nodes;

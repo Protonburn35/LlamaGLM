@@ -6,7 +6,7 @@
 # Only then it starts llama-server. Use -PlanOnly to stop after Gate 2.
 # Experiments are off unless a switch below (or "options" in cluster_config.json) turns them on.
 param (
-    [ValidateSet("balanced", "balanced-mtp", "tight", "tight-mtp", "laptop-light")][string]$Plan = "balanced",
+    [ValidateSet("balanced", "balanced-mtp", "tight", "tight-mtp", "relief", "gpu-attn", "laptop-light")][string]$Plan = "balanced",
     [string]$ModelDir = "",
     [switch]$PlanOnly,
     [switch]$SkipSelfTest,
@@ -20,6 +20,12 @@ param (
     [switch]$Prefetch,
     # print per-device time per token every 30 s in the server log (GGML_SCHED_PROFILE)
     [switch]$Timing,
+    # keep the fused hyper-connection post op on: the layer 17 placement check otherwise disables it (LLAMA_FUSED_HC_FIX)
+    [switch]$FusedHc,
+    # diagnostic: turn CUDA graphs off on the 4090 to see whether they were working (GGML_CUDA_DISABLE_GRAPHS)
+    [switch]$NoCudaGraphs,
+    # GPU cache for the hottest routed experts kept in Stage A's RAM; only used by -Plan gpu-attn
+    [ValidateRange(0, 8192)][int]$MoeCacheMib = 0,
     [ValidateRange(0, 64)][int]$Threads = 0,
     [ValidateSet(0, 256, 512, 1024, 2048)][int]$UBatch = 0,
     # folder with llama-server.exe / llama-fit-params.exe, e.g. the official llama.cpp b11780 CUDA build
@@ -128,14 +134,24 @@ $draftMax    = if ($MtpDraftMax -gt 0) { $MtpDraftMax } elseif ($opt -and $opt.m
 $usePrefetch = $Prefetch -or ($opt -and $opt.moe_prefetch)
 $useTiming   = $Timing -or ($opt -and $opt.timing)
 $useOffload  = $OpOffload -or ($opt -and $opt.op_offload)
+$useFusedHc  = $FusedHc -or ($opt -and $opt.fused_hc)
+$noGraphs    = $NoCudaGraphs -or ($opt -and $opt.cuda_graphs_off)
+$moeCache    = if ($MoeCacheMib -gt 0) { $MoeCacheMib } elseif ($opt -and $opt.moe_cache_mib -gt 0) { [int]$opt.moe_cache_mib } else { 0 }
+$nCpuMoe     = if ($p.n_cpu_moe -gt 0) { [int]$p.n_cpu_moe } else { 0 }
 $threadsA    = if ($Threads -gt 0) { $Threads } elseif ($cfg.stage_a.threads -gt 0) { [int]$cfg.stage_a.threads } else { 0 }
 $ubatch      = if ($UBatch -gt 0) { $UBatch } else { [int]$cfg.model.ubatch }
 Set-OptionalEnv $log "LLAMA_MOE_PREFETCH" $usePrefetch
 Set-OptionalEnv $log "GGML_SCHED_PROFILE" $useTiming
-Write-LogLine $log ("[OPTIONS] plan {0}, MTP {1}, prefetch {2}, timing {3}, op offload {4}, threads {5}, ubatch {6}" -f $Plan,
+Set-OptionalEnv $log "LLAMA_FUSED_HC_FIX" $useFusedHc
+Set-OptionalEnv $log "GGML_CUDA_DISABLE_GRAPHS" $noGraphs
+Write-LogLine $log ("[OPTIONS] plan {0}, MTP {1}, prefetch {2}, timing {3}, fused HC {4}, CUDA graphs {5}, MoE cache {6}, op offload {7}, threads {8}, ubatch {9}" -f $Plan,
     $(if ($useMtp) { "on (draft max $draftMax)" } else { "off" }), $(if ($usePrefetch) { "on" } else { "off" }),
-    $(if ($useTiming) { "on" } else { "off" }), $(if ($useOffload) { "on" } else { "off" }),
-    $(if ($threadsA -gt 0) { $threadsA } else { "default" }), $ubatch) "Cyan"
+    $(if ($useTiming) { "on" } else { "off" }), $(if ($useFusedHc) { "on" } else { "off" }),
+    $(if ($noGraphs) { "off (diagnostic)" } else { "on" }), $(if ($moeCache -gt 0) { "$moeCache MiB" } else { "off" }),
+    $(if ($useOffload) { "on" } else { "off" }), $(if ($threadsA -gt 0) { $threadsA } else { "default" }), $ubatch) "Cyan"
+if ($moeCache -gt 0 -and $nCpuMoe -eq 0) {
+    Write-LogLine $log "[NOTE] -MoeCacheMib only caches experts of GPU layers whose experts stay in RAM; plan '$Plan' has none, so the cache stays empty. Use -Plan gpu-attn." "Yellow"
+}
 if ($useMtp -and !$p.mtp_block) {
     Write-LogLine $log "[NOTE] plan '$Plan' leaves no room for the MTP block on C's GPU; Gate 2 will likely refuse it. Use -Plan balanced-mtp or tight-mtp." "Yellow"
 }
@@ -167,6 +183,13 @@ if (!$useOffload) {
 }
 if ($threadsA -gt 0) {
     $common += @("-t", "$threadsA")
+}
+# gpu-attn: the 4090 holds layers 0-24 but the routed experts of the first n_cpu_moe layers stay in Stage A's RAM
+if ($nCpuMoe -gt 0) {
+    $common += @("--n-cpu-moe", "$nCpuMoe")
+}
+if ($moeCache -gt 0) {
+    $common += @("--moe-cache-mib", "$moeCache")
 }
 # the projection must load the MTP block too, so the server's own check sees the same plan
 if ($useMtp) {

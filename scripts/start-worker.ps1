@@ -9,6 +9,8 @@ param (
     [switch]$Timing,
     # copy between this PC's RAM and GPU locally instead of through Stage A (GGML_RPC_SERVER_LOCAL_COPY)
     [switch]$LocalCopy,
+    # diagnostic: turn CUDA graphs off on this PC's GPU to see whether they were working (GGML_CUDA_DISABLE_GRAPHS)
+    [switch]$NoCudaGraphs,
     # folder with ggml-rpc-server.exe, e.g. the official llama.cpp b11780 CUDA build
     [string]$BinDir = $PSScriptRoot,
     [string]$ConfigPath = (Join-Path $PSScriptRoot "cluster_config.json")
@@ -72,9 +74,12 @@ $env:GGML_RPC_SERVER_RESERVE_MIB = $w.reserve_mib
 $opt = $cfg.options
 $useTiming    = $Timing -or ($opt -and $opt.worker_timing)
 $useLocalCopy = $LocalCopy -or ($opt -and $opt.worker_local_copy)
+$noGraphs     = $NoCudaGraphs -or ($opt -and $opt.worker_cuda_graphs_off)
 Set-OptionalEnv $log "GGML_RPC_SERVER_PROFILE" $useTiming
 Set-OptionalEnv $log "GGML_RPC_SERVER_LOCAL_COPY" $useLocalCopy
-Write-LogLine $log ("[OPTIONS] timing {0}, local copy {1}" -f $(if ($useTiming) { "on" } else { "off" }), $(if ($useLocalCopy) { "on" } else { "off" })) "Cyan"
+Set-OptionalEnv $log "GGML_CUDA_DISABLE_GRAPHS" $noGraphs
+Write-LogLine $log ("[OPTIONS] timing {0}, local copy {1}, CUDA graphs {2}" -f $(if ($useTiming) { "on" } else { "off" }),
+    $(if ($useLocalCopy) { "on" } else { "off" }), $(if ($noGraphs) { "off (diagnostic)" } else { "on" })) "Cyan"
 $threads = $w.threads
 if ($threads -le 0) {
     $threads = [int]((Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum)

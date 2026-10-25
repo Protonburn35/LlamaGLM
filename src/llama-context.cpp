@@ -328,6 +328,11 @@ llama_context::llama_context(
     cparams.fused_dsv4_hc_post = true;
     cparams.auto_fhc           = true;
 
+    {
+        const char * env = getenv("LLAMA_FUSED_HC_FIX");
+        cparams.fused_by_support = env != nullptr && atoi(env) != 0;
+    }
+
     // with causal attention, the batch size is limited by the context size
     cparams.n_batch = cparams.causal_attn ? std::min(cparams.n_ctx, params.n_batch) : params.n_batch;
 
@@ -624,6 +629,17 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
             // TODO: make this descriptor-specific; model.dev_layer() preserves the current behavior,
             // but is still wrong for cases like --no-kv-offload.
             ggml_backend_dev_t device_layer = model.dev_layer(node.il);
+
+            if (device_fused != device_layer && cparams.fused_by_support && device_fused && device_layer &&
+                    ggml_backend_dev_supports_op(device_layer, node.tensor) &&
+                    ggml_backend_dev_supports_op(device_fused, node.tensor)) {
+                // the scheduler moves weightless nodes at a layer boundary to the neighbouring GPU;
+                // both devices can run the op, so this is a placement, not missing support
+                LLAMA_LOG_INFO("%s: layer %d is assigned to device %s and %s to device %s, "
+                        "which both support it (LLAMA_FUSED_HC_FIX)\n",
+                        func, node.il, ggml_backend_dev_name(device_layer), probe.name, ggml_backend_dev_name(device_fused));
+                continue;
+            }
 
             if (device_fused != device_layer) {
                 LLAMA_LOG_WARN("%s: layer %d is assigned to device %s but %s "

@@ -1,5 +1,5 @@
 {
-  "version": "0.8.2",
+  "version": "0.8.3",
   "model": {
     "dir": "C:\\GLM-5.3-Flash\\UD-IQ3_XXS",
     "first_shard": "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
@@ -46,8 +46,12 @@
     "moe_prefetch": false,
     "timing": false,
     "op_offload": false,
+    "fused_hc": false,
+    "cuda_graphs_off": false,
+    "moe_cache_mib": 0,
     "worker_timing": false,
-    "worker_local_copy": false
+    "worker_local_copy": false,
+    "worker_cuda_graphs_off": false
   },
   "rpc_device_names": {
     "RPC0": "Stage B GPU (RTX 4060 Laptop)",
@@ -118,6 +122,39 @@
         "B RTX 4060 (RPC0)": "33-34, 5.1 GiB",
         "C RAM (RPC3)": "35-41, 17.8 GiB",
         "C RTX 5070 Ti (RPC2)": "42-44 + NextN 45 (loaded with MTP) + output, 10.9 GiB"
+      }
+    },
+    "relief": {
+      "note": "tight plus one more layer in C's RAM: Stage A maps about 5 GiB less than balanced; C's RAM fits only with about 24.1 GiB free at load (Gate 2 decides)",
+      "ngl": 31,
+      "devices": ["CUDA0", "RPC1", "RPC0", "RPC3", "RPC2"],
+      "ts": [8, 7, 2, 8, 6],
+      "fit_margin_mib": [1536, 2560, 512, 2560, 1024],
+      "mtp_block": false,
+      "layers": {
+        "A RAM (mmap)": "0-15, 35.2 GiB incl. token_embd",
+        "A RTX 4090 (CUDA0)": "16-23, 20.3 GiB",
+        "B RAM (RPC1)": "24-30, 17.8 GiB",
+        "B RTX 4060 (RPC0)": "31-32, 5.1 GiB",
+        "C RAM (RPC3)": "33-40, 20.3 GiB",
+        "C RTX 5070 Ti (RPC2)": "41-44 + output, NextN slot 45 not loaded, 10.9 GiB"
+      }
+    },
+    "gpu-attn": {
+      "note": "experimental: the 4090 also runs attention, shared expert and hyper-connections of layers 0-18, whose routed experts stay in Stage A's RAM (--n-cpu-moe 19); the 7800X3D computes only those experts. Workers as in balanced. Can be slower until the GPU cost per op is known",
+      "ngl": 47,
+      "n_cpu_moe": 19,
+      "devices": ["CUDA0", "RPC1", "RPC0", "RPC3", "RPC2"],
+      "ts": [25, 7, 2, 7, 6],
+      "fit_margin_mib": [1536, 2560, 512, 2560, 1024],
+      "mtp_block": false,
+      "layers": {
+        "A RAM (mmap)": "routed experts of 3-18 + token_embd, about 39 GiB (estimate)",
+        "A RTX 4090 (CUDA0)": "0-24 except the routed experts of 3-18, about 18 GiB (estimate; Gate 2 prints it)",
+        "B RAM (RPC1)": "25-31, 17.8 GiB",
+        "B RTX 4060 (RPC0)": "32-33, 5.1 GiB",
+        "C RAM (RPC3)": "34-40, 17.8 GiB",
+        "C RTX 5070 Ti (RPC2)": "41-44 + output, NextN slot 45 not loaded, 10.9 GiB"
       }
     },
     "laptop-light": {

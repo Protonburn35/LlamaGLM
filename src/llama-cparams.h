@@ -47,6 +47,8 @@ struct llama_cparams {
     bool fused_dsv4_hc_pre;
     bool fused_dsv4_hc_comb;
     bool fused_dsv4_hc_post;
+    bool fused_by_support;   // LLAMA_FUSED_HC_FIX=1: a fused node placed off its layer's device is not a fallback
+                             // when both devices support it
     bool auto_fhc;
     bool no_perf;
     bool warmup;             // TODO: remove [TAG_LLAMA_GRAPH_NO_WARMUP]

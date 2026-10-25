@@ -52,8 +52,11 @@ foreach ($plan in $cfg.profiles.PSObject.Properties) {
     if ((($p.ts | Measure-Object -Sum).Sum) -ne $p.ngl) { throw "plan $($plan.Name): sum(ts) != ngl" }
     if ($p.devices.Count -ne $p.ts.Count -or $p.fit_margin_mib.Count -ne $p.ts.Count) { throw "plan $($plan.Name): devices, ts and fit_margin_mib differ in length" }
     if ($planNames -notcontains $plan.Name) { throw "plan $($plan.Name) is not in the -Plan list of start-stage-a.ps1" }
+    # with --n-cpu-moe every layer is offloaded and the CPU-expert layers must be on the 4090 (the first device)
+    if ($p.n_cpu_moe -gt 0 -and ($p.ngl -ne 47 -or $p.ts[0] -lt $p.n_cpu_moe)) { throw "plan $($plan.Name): n_cpu_moe needs ngl 47 and at least n_cpu_moe layers on the first device" }
 }
-foreach ($name in @("mtp", "moe_prefetch", "timing", "op_offload", "worker_timing", "worker_local_copy")) {
+foreach ($name in @("mtp", "moe_prefetch", "timing", "op_offload", "fused_hc", "cuda_graphs_off", "worker_timing", "worker_local_copy", "worker_cuda_graphs_off")) {
     if ($cfg.options.$name -ne $false) { throw "option $name must default to false" }
 }
+if ($cfg.options.moe_cache_mib -ne 0) { throw "option moe_cache_mib must default to 0" }
 Write-Host "PASS: $(@($cfg.profiles.PSObject.Properties).Count) plans are consistent and selectable; all experiments default to off"

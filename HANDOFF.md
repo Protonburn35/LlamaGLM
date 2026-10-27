@@ -1,5 +1,16 @@
 # LlamaGLM status
 
+**2026-10-27: active work has moved to DeepSeek-V4.1-Flash on Strata.** The work is on branch `stratarpcd` of
+[Protonburn35/StrataRPC](https://github.com/Protonburn35/StrataRPC/tree/stratarpcd). Read its `HANDOFF.md` for the
+design, status and next steps. LlamaGLM v0.8.4 is built (run 40202088082) but untested on hardware, and it gets no new
+work for now.
+
+The reasons, estimated, not measured:
+- **Decode:** mainline Strata's DeepSeek engine reads about 2.1 GB of experts per token at full quality, against
+  GLM IQ3_XXS's ~3.2 GB. It streams them with large SSD reads instead of mmap faults.
+- **Prompts:** about 100-400 tok/s, against LlamaGLM's 5-6.
+- **Expected:** about 5-6 tok/s decode on A + C, and 6.5-8 with the laptop.
+
 The active implementation on `master` is the v0.8.1 Windows package of the repaired upstream-RPC prototype exported from the VM (engine snapshot `502ff59`, launcher snapshot `6664b7d`, packaged source `bb0bc7d`). The engine lives at the repository root; launchers are in `scripts/`. The original custom stage-runtime branch remains separate. CUDA self-tests and full-model requests have now completed on the user's three PCs; generation speed is the main issue to investigate.
 
 Both Claude and Codex are authorized to develop, commit, and push directly to `master`. Fetch the latest remote changes before starting, preserve the other developer's commits, and update this handoff with changes, test results, open issues, and next steps. Force pushes remain prohibited.
